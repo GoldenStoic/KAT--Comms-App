@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Voice + Chat Room</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Voice+Chat Room</title>
   <style>
     body { font-family: sans-serif; }
-    #waiting,#chat,#controls,#material { margin:1em; }
+    #waiting, #chat, #controls, #material { margin: 1em; }
   </style>
 </head>
 <body>
@@ -30,26 +30,21 @@
   </div>
 
   <script>
-  (async()=> {
-    // ——— fetch dynamic ICE servers from your API ———
-    const iceResp    = await fetch("/ice_servers").then(r=>r.json());
-    const ICE_SERVERS = iceResp.iceServers;
-
-    const token  = prompt("Enter your JWT token (admin or user)");
+    const token  = prompt("Enter token (admin or user JWT)");
     const roomId = "room123";
-    const proto  = location.protocol==="https:"?"wss":"ws";
-    const wsUrl  = `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`;
-    const ws     = new WebSocket(wsUrl);
+    const proto  = location.protocol === "https:" ? "wss" : "ws";
+    const ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
     let pc, localStream;
 
-    ws.onmessage = async ({data}) => {
-      let msg; 
-      try { msg=JSON.parse(data); }
-      catch { return; }
-
-      switch(msg.type) {
+    // ———————————————
+    // Handle incoming signaling
+    // ———————————————
+    ws.onmessage = async ({ data }) => {
+      const msg = JSON.parse(data);
+      switch (msg.type) {
         case "new_waiting":
+          // populate the admin’s admit dropdown
           const sel = document.getElementById("waitingList");
           const opt = document.createElement("option");
           opt.value = msg.peer_id;
@@ -58,32 +53,34 @@
           break;
 
         case "waiting":
-          document.getElementById("waiting").style.display="block";
+          document.getElementById("waiting").style.display = "block";
           break;
 
         case "admitted":
         case "ready_for_offer":
-          document.getElementById("waiting").style.display="none";
-          document.getElementById("chat").style.display="block";
-          document.getElementById("controls").style.display =
-            tokenRole()==="admin"?"block":"none";
+          // hide waiting, show chat & controls, then start WebRTC
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
+          document.getElementById("controls").style.display = (tokenRole()==="admin"?"block":"none");
           await startWebRTC();
           break;
 
         case "answer":
           await pc.setRemoteDescription(
-            new RTCSessionDescription({type:"answer",sdp:msg.sdp})
+            new RTCSessionDescription({ type:"answer", sdp: msg.sdp })
           );
           break;
 
         case "ice":
-          if(pc && msg.candidate) {
-            await pc.addIceCandidate(msg.candidate);
+          // add remote ICE candidate
+          if (pc && msg.candidate) {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           }
           break;
 
         case "chat":
-          document.getElementById("chat").style.display="block";
+          // text chat fan-out
+          document.getElementById("chat").style.display = "block";
           const log = document.getElementById("chatLog");
           log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
           log.scrollTop = log.scrollHeight;
@@ -95,52 +92,66 @@
       }
     };
 
+    // ———————————————
+    // Start WebRTC once admitted & ready
+    // ———————————————
     async function startWebRTC() {
-      if(pc) return;  // already started
+      if (pc) return;  // only once
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({audio:true});
-      } catch(err) {
-        alert("Microphone access required: "+err.message);
-        return;
+        localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      } catch (e) {
+        return alert("Mic access is required!");
       }
 
-      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      // build our RTCPeerConnection
+      pc = new RTCPeerConnection({
+        iceTransportPolicy: "all",
+        bundlePolicy:      "balanced",
+        rtcpMuxPolicy:     "require",
+        iceServers:        []   // server will push STUN/TURN candidates via onicecandidate
+      });
+
       pc.onicecandidate = e => {
-        if(e.candidate) {
-          ws.send(JSON.stringify({type:"ice",candidate:e.candidate.toJSON()}));
+        if (e.candidate) {
+          ws.send(JSON.stringify({ type:"ice", candidate: e.candidate.toJSON() }));
         }
       };
       pc.ontrack = e => {
+        // play any incoming audio
         const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
         audio.autoplay = true;
         document.body.appendChild(audio);
       };
 
+      // attach mic
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
+      // kick off SDP
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({type:"offer",sdp:offer.sdp}));
+      ws.send(JSON.stringify({ type:"offer", sdp: offer.sdp }));
     }
 
-    // ——— chat & admin UI ———
+    // ———————————————
+    // chat & admin UI
+    // ———————————————
     document.getElementById("sendBtn").onclick = () => {
       const txt = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({type:"chat",from:tokenRole(),text:txt}));
+      ws.send(JSON.stringify({ type:"chat", from: tokenRole(), text: txt }));
       document.getElementById("msgIn").value = "";
     };
     document.getElementById("admitBtn").onclick = () => {
       const peerId = Number(document.getElementById("waitingList").value);
-      ws.send(JSON.stringify({type:"admit",peer_id:peerId}));
+      ws.send(JSON.stringify({ type:"admit", peer_id: peerId }));
     };
     document.getElementById("nextSlide").onclick = () => {
-      ws.send(JSON.stringify({type:"material_event",event:"next_slide"}));
+      ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
     };
     document.getElementById("startQuiz").onclick = () => {
       ws.send(JSON.stringify({
-        type:"material_event",event:"start_quiz",payload:{quizId:42}
+        type:"material_event", event:"start_quiz", payload:{ quizId:42 }
       }));
     };
 
@@ -152,12 +163,10 @@
       }
     }
     function handleMaterial(event,payload) {
-      const mat = document.getElementById("material");
-      if(event==="next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
-      if(event==="start_quiz") mat.innerHTML += 
-        `<p>❓ Quiz ${payload.quizId} started!</p>`;
+      const m = document.getElementById("material");
+      if (event==="next_slide") m.innerHTML += "<p>➡️ Next slide</p>";
+      if (event==="start_quiz") m.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
     }
-  })();
   </script>
 </body>
 </html>
