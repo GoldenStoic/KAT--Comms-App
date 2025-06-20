@@ -3,14 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Voice+Chat Room</title>
+  <title>Voice + Chat Room</title>
   <style>
     body { font-family: sans-serif; }
-    #waiting,#chat,#controls,#material { margin:1em; }
+    #waiting, #chat, #controls, #material { margin: 1em; }
   </style>
 </head>
 <body>
   <h1>Training Room</h1>
+
   <div id="waiting">Waiting for admin to admit…</div>
 
   <div id="controls" style="display:none;">
@@ -25,111 +26,140 @@
 
   <div id="chat" style="display:none;">
     <div id="chatLog" style="height:200px;overflow:auto;border:1px solid #ccc;"></div>
-    <input id="msgIn" placeholder="Message…"/><button id="sendBtn">Send</button>
+    <input id="msgIn" placeholder="Message…" /><button id="sendBtn">Send</button>
   </div>
 
   <script>
     const token  = prompt("Enter token (admin or user JWT)");
     const roomId = "room123";
-    const proto  = window.location.protocol==="https:"?"wss":"ws";
-    const ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+    const proto  = location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl  = `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`;
+    const ws     = new WebSocket(wsUrl);
 
-    let pc, localStream, ICE_SERVERS;
+    const ICE_SERVERS = [
+      { urls: ["stun:stun.l.google.com:19302"] },
+      { urls: ["stun:global.stun.twilio.com:3478?transport=udp"] }
+    ];
 
-    // — fetch the STUN+TURN list on startup —
-    (async function(){
-      let r = await fetch("/ice");
-      let js = await r.json();
-      ICE_SERVERS = js.iceServers;
-    })();
+    let pc, localStream;
 
-    ws.onmessage = async ({data})=>{
+    ws.onmessage = async ({ data }) => {
       const msg = JSON.parse(data);
-      switch(msg.type){
+      switch (msg.type) {
         case "new_waiting":
-          let sel = document.getElementById("waitingList");
-          let opt = new Option(`User ${msg.peer_id}`, msg.peer_id);
-          sel.add(opt);
+          const sel = document.getElementById("waitingList");
+          const opt = document.createElement("option");
+          opt.value = msg.peer_id;
+          opt.text  = `User ${msg.peer_id}`;
+          sel.appendChild(opt);
           break;
 
         case "waiting":
-          document.getElementById("waiting").style.display="block";
+          document.getElementById("waiting").style.display = "block";
           break;
 
         case "admitted":
         case "ready_for_offer":
-          // show UI
-          document.getElementById("waiting").style.display="none";
-          document.getElementById("chat").style.display="block";
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = tokenRole()==="admin"?"block":"none";
           await startWebRTC();
           break;
 
         case "answer":
-          await pc.setRemoteDescription(new RTCSessionDescription({type:"answer",sdp:msg.sdp}));
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
+          );
           break;
 
         case "ice":
-          if(msg.candidate) await pc.addIceCandidate(msg.candidate);
+          if (pc && msg.candidate) {
+            await pc.addIceCandidate(msg.candidate);
+          }
           break;
 
         case "chat":
-          let log = document.getElementById("chatLog");
+          document.getElementById("chat").style.display = "block";
+          const log = document.getElementById("chatLog");
           log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
           log.scrollTop = log.scrollHeight;
           break;
 
         case "material_event":
-          handleMaterial(msg.event,msg.payload);
+          handleMaterial(msg.event, msg.payload);
           break;
       }
     };
 
-    async function startWebRTC(){
-      if(pc) return;
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia({audio:true});
-      } catch(e){
-        return alert("Microphone access denied: "+e.message);
-      }
-      pc = new RTCPeerConnection({iceServers: ICE_SERVERS});
+    async function startWebRTC() {
+      if (pc) return;  // only once
 
-      pc.onicecandidate = e=>{
-        if(e.candidate) ws.send(JSON.stringify({type:"ice",candidate:e.candidate.toJSON()}));
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        alert("Microphone required: " + err.message);
+        return;
+      }
+
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          // send only the three required fields
+          ws.send(JSON.stringify({
+            type: "ice",
+            candidate: {
+              candidate:      e.candidate.candidate,
+              sdpMid:         e.candidate.sdpMid,
+              sdpMLineIndex:  e.candidate.sdpMLineIndex
+            }
+          }));
+        }
       };
-      pc.ontrack = e=>{
-        let audio = document.createElement("audio");
+
+      pc.ontrack = e => {
+        const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
         audio.autoplay = true;
         document.body.appendChild(audio);
       };
-      localStream.getTracks().forEach(t=>pc.addTrack(t, localStream));
 
-      let offer = await pc.createOffer();
+      // add mic audio
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      // create + send offer
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({type:"offer",sdp:offer.sdp}));
+      ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
     }
 
-    document.getElementById("sendBtn").onclick = ()=>{
-      let t = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({type:"chat",from:tokenRole(),text:t}));
-      document.getElementById("msgIn").value="";
+    // chat & controls
+    document.getElementById("sendBtn").onclick = () => {
+      const text = document.getElementById("msgIn").value;
+      ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text }));
+      document.getElementById("msgIn").value = "";
     };
-    document.getElementById("admitBtn").onclick = ()=>{
-      let pid = Number(document.getElementById("waitingList").value);
-      ws.send(JSON.stringify({type:"admit",peer_id:pid}));
+    document.getElementById("admitBtn").onclick = () => {
+      const peerId = Number(document.getElementById("waitingList").value);
+      ws.send(JSON.stringify({ type:"admit", peer_id:peerId }));
     };
-    document.getElementById("nextSlide").onclick = ()=>ws.send(JSON.stringify({type:"material_event",event:"next_slide"}));
-    document.getElementById("startQuiz").onclick = ()=>ws.send(JSON.stringify({type:"material_event",event:"start_quiz",payload:{quizId:42}}));
+    document.getElementById("nextSlide").onclick = () => {
+      ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
+    };
+    document.getElementById("startQuiz").onclick = () => {
+      ws.send(JSON.stringify({
+        type:"material_event", event:"start_quiz", payload:{ quizId:42 }
+      }));
+    };
 
     function tokenRole(){
       try { return JSON.parse(atob(token.split(".")[1])).role; }
       catch { return "user"; }
     }
     function handleMaterial(ev,p){
-      let m = document.getElementById("material");
-      if(ev==="next_slide") m.innerHTML+="<p>➡️ Next slide</p>";
-      if(ev==="start_quiz") m.innerHTML+=`<p>❓ Quiz ${p.quizId} started!</p>`;
+      const m = document.getElementById("material");
+      if (ev==="next_slide") m.innerHTML += "<p>➡️ Next slide</p>";
+      if (ev==="start_quiz") m.innerHTML += `<p>❓ Quiz ${p.quizId} started!</p>`;
     }
   </script>
 </body>
