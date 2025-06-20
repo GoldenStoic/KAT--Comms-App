@@ -6,19 +6,16 @@
   <style>
     body { font-family: sans-serif; }
     #waiting, #chat, #controls, #material { margin: 1em; }
-    #controls { display: none; }
-    #chat     { display: none; }
+    #controls, #chat { display: none; }
   </style>
 </head>
 <body>
   <h1>Training Room</h1>
 
   <div id="waiting">Waiting for admin to admit…</div>
-
   <div id="controls">
     <button id="admitBtn">(Admin) Admit Selected</button>
-    <select id="waitingList"></select>
-    <br/><br/>
+    <select id="waitingList"></select><br/><br/>
     <button id="nextSlide">Next Slide</button>
     <button id="startQuiz">Start Quiz</button>
   </div>
@@ -31,31 +28,20 @@
   </div>
 
   <script>
-    // ———————————————
-    // 1) WebSocket setup
-    // ———————————————
-    const token  = prompt("Enter token (admin or user JWT)");
-    const roomId = "room123";
+    const token  = prompt("Enter JWT token (admin or user)");
     const proto  = location.protocol === "https:" ? "wss" : "ws";
-    const ws     = new WebSocket(
-      `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`
-    );
+    const ws     = new WebSocket(`${proto}://${location.host}/ws/room123?token=${encodeURIComponent(token)}`);
 
-    // your STUN/TURN servers
     const ICE_SERVERS = [
       { urls: ["stun:stun.l.google.com:19302"] },
-      { urls: ["stun:global.stun.twilio.com:3478"] }
+      { urls: ["stun:global.stun.twilio.com:3478?transport=udp"] }
     ];
 
     let pc, localStream;
 
-    // ———————————————
-    // 2) Handle incoming WS messages
-    // ———————————————
     ws.onmessage = async ({ data }) => {
       const msg = JSON.parse(data);
       switch (msg.type) {
-
         case "new_waiting":
           document.getElementById("controls").style.display = "block";
           const sel = document.getElementById("waitingList");
@@ -72,26 +58,19 @@
         case "admitted":
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
-          document.getElementById("controls").style.display = tokenRole() === "admin"
-            ? "block"
-            : "none";
+          document.getElementById("controls").style.display = tokenRole() === "admin" ? "block" : "none";
           break;
 
         case "ready_for_offer":
-          // only here do we start the SDP handshake
           await startWebRTC();
           break;
 
         case "answer":
-          await pc.setRemoteDescription(
-            new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
-          );
+          await pc.setRemoteDescription(new RTCSessionDescription({ type:"answer", sdp: msg.sdp }));
           break;
 
         case "ice":
-          if (pc && msg.candidate) {
-            await pc.addIceCandidate(msg.candidate);
-          }
+          if (pc && msg.candidate) await pc.addIceCandidate(msg.candidate);
           break;
 
         case "chat":
@@ -107,80 +86,53 @@
       }
     };
 
-    // ———————————————
-    // 3) WebRTC negotiation
-    // ———————————————
     async function startWebRTC() {
       if (pc) return;
-
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (err) {
-        alert("Microphone access is required: " + err.message);
-        return;
+      } catch (e) {
+        return alert("Microphone access required: " + e.message);
       }
-
       pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pc.onicecandidate = e => {
         if (e.candidate) {
-          ws.send(JSON.stringify({ type: "ice", candidate: e.candidate.toJSON() }));
+          ws.send(JSON.stringify({ type:"ice", candidate: e.candidate.toJSON() }));
         }
       };
       pc.ontrack = e => {
         const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
-        audio.autoplay  = true;
+        audio.autoplay = true;
         document.body.appendChild(audio);
       };
-
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
+      ws.send(JSON.stringify({ type:"offer", sdp: offer.sdp }));
     }
 
-    // ———————————————
-    // 4) Chat & admin controls
-    // ———————————————
     document.getElementById("sendBtn").onclick = () => {
-      const txt = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({ type: "chat", from: tokenRole(), text: txt }));
+      const t = document.getElementById("msgIn").value;
+      ws.send(JSON.stringify({ type:"chat", from: tokenRole(), text: t }));
       document.getElementById("msgIn").value = "";
     };
-
     document.getElementById("admitBtn").onclick = () => {
-      const peerId = Number(document.getElementById("waitingList").value);
-      ws.send(JSON.stringify({ type: "admit", peer_id: peerId }));
+      const pid = Number(document.getElementById("waitingList").value);
+      ws.send(JSON.stringify({ type:"admit", peer_id: pid }));
     };
+    document.getElementById("nextSlide").onclick  = () => ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
+    document.getElementById("startQuiz").onclick  = () => ws.send(JSON.stringify({
+      type:"material_event", event:"start_quiz", payload:{ quizId:42 }
+    }));
 
-    document.getElementById("nextSlide").onclick = () => {
-      ws.send(JSON.stringify({ type: "material_event", event: "next_slide" }));
-    };
-    document.getElementById("startQuiz").onclick = () => {
-      ws.send(JSON.stringify({
-        type: "material_event",
-        event: "start_quiz",
-        payload: { quizId: 42 }
-      }));
-    };
-
-    // ———————————————
-    // Helpers
-    // ———————————————
     function tokenRole() {
-      try {
-        return JSON.parse(atob(token.split(".")[1])).role;
-      } catch {
-        return "user";
-      }
+      try { return JSON.parse(atob(token.split(".")[1])).role; }
+      catch { return "user"; }
     }
-
-    function handleMaterial(event, payload) {
-      const mat = document.getElementById("material");
-      if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
-      if (event === "start_quiz")
-        mat.innerHTML += `<p>❓ Quiz ${payload.quizId} started!</p>`;
+    function handleMaterial(evt, p) {
+      const m = document.getElementById("material");
+      if (evt==="next_slide")  m.innerHTML += "<p>➡️ Next slide</p>";
+      if (evt==="start_quiz") m.innerHTML += `<p>❓ Quiz ${p.quizId} started!</p>`;
     }
   </script>
 </body>
