@@ -14,21 +14,23 @@ from aiortc import (
 from aiortc.contrib.media import MediaRelay
 
 # -----------------------------------------------------------------------------
-# CONFIG
+# CONFIGURATION
 # -----------------------------------------------------------------------------
-JWT_SECRET  = os.getenv("JWT_SECRET", "change-this-for-prod")
+JWT_SECRET  = os.getenv("JWT_SECRET", "change-this-for-production")
 ICE_SERVERS = [
     {"urls": "stun:stun.l.google.com:19302"},
     {"urls": "stun:global.stun.twilio.com:3478"}
 ]
 
 # -----------------------------------------------------------------------------
-# APP SETUP
+# APPLICATION SETUP
 # -----------------------------------------------------------------------------
 app   = FastAPI()
 relay = MediaRelay()
-rooms = {}  # room_id -> { waiting: set, peers: dict, tracks: list, admins: set }
+# room state holds waiting sockets, admitted peers →PC, relayed tracks, admin sockets
+rooms = {}  # room_id -> { "waiting":set, "peers":dict, "tracks":list, "admins":set }
 
+# serve index.html and static/
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
@@ -39,18 +41,22 @@ async def index():
 # HELPERS
 # -----------------------------------------------------------------------------
 async def authenticate(token: str) -> str:
+    """Decode JWT and return 'admin' or 'user'."""
     try:
         data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return data.get("role", "user")
     except Exception:
         return "user"
 
-async def do_admit(ws: WebSocket, room: dict):
-    """Remove from waiting, notify client, build PeerConnection, wire tracks."""
+async def admit(ws: WebSocket, room: dict):
+    """
+    Remove `ws` from waiting, notify client, create a PeerConnection,
+    wire up audio tracks (SFU-style) and request an offer.
+    """
     room["waiting"].discard(ws)
     await ws.send_json({"type": "admitted", "peer_id": id(ws)})
 
-    # build a real RTCConfiguration
+    # build real RTCConfiguration
     ice_servers = [RTCIceServer(**s) for s in ICE_SERVERS]
     config      = RTCConfiguration(iceServers=ice_servers)
 
@@ -60,22 +66,22 @@ async def do_admit(ws: WebSocket, room: dict):
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
-            sub = relay.subscribe(track)
-            room["tracks"].append(sub)
-            # forward this track to all existing peers
+            relay_track = relay.subscribe(track)
+            room["tracks"].append(relay_track)
+            # forward to every other peer
             for other in room["peers"].values():
                 if other is not pc:
-                    other.addTrack(sub)
+                    other.addTrack(relay_track)
 
-    # forward any already-collected tracks
+    # forward any already-collected audio
     for t in room["tracks"]:
         pc.addTrack(t)
 
-    # tell client we’re ready for its offer
+    # tell client to createOffer()
     await ws.send_json({"type": "ready_for_offer"})
 
 # -----------------------------------------------------------------------------
-# WEBSOCKET ENDPOINT
+# WEBSOCKET / SIGNALING
 # -----------------------------------------------------------------------------
 @app.websocket("/ws/{room_id}")
 async def ws_endpoint(ws: WebSocket, room_id: str,
@@ -83,7 +89,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str,
     await ws.accept()
     role = await authenticate(token)
 
-    # init or fetch room state
+    # create or grab our room state
     room = rooms.setdefault(room_id, {
         "waiting": set(),
         "peers":   {},
@@ -92,18 +98,20 @@ async def ws_endpoint(ws: WebSocket, room_id: str,
     })
 
     if role == "admin":
+        # auto-admit admin
         room["admins"].add(ws)
-        await do_admit(ws, room)
-        # let the new admin know who’s waiting
+        await admit(ws, room)
+        # let new admin know who’s waiting
         for w in room["waiting"]:
             await ws.send_json({"type": "new_waiting", "peer_id": id(w)})
     else:
+        # normal user → waiting list
         room["waiting"].add(ws)
         await ws.send_json({"type": "waiting"})
-        # notify all admins
+        # notify every admin
         for a in room["admins"]:
             await a.send_json({"type": "new_waiting", "peer_id": id(ws)})
-        # block until an admin calls do_admit()
+        # block until admin calls admit()
         while ws not in room["peers"]:
             await asyncio.sleep(0.1)
 
@@ -116,21 +124,22 @@ async def ws_endpoint(ws: WebSocket, room_id: str,
                 pc    = room["peers"][ws]
                 offer = RTCSessionDescription(sdp=msg["sdp"], type="offer")
                 await pc.setRemoteDescription(offer)
-                ans = await pc.createAnswer()
-                await pc.setLocalDescription(ans)
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
                 await ws.send_json({
                     "type": "answer",
                     "sdp":  pc.localDescription.sdp
                 })
 
             elif t == "ice":
-                # HERE’S THE FIX: wrap the dict in an object
-                raw = msg["candidate"]
+                raw = msg.get("candidate")
                 if raw:
+                    # wrap into an object that aiortc expects:
                     cand = SimpleNamespace(
                         sdpMid        = raw.get("sdpMid"),
                         sdpMLineIndex = raw.get("sdpMLineIndex"),
-                        candidate     = raw.get("candidate")
+                        candidate     = raw.get("candidate"),
+                        component     = 1         # required by aiortc’s candidate_to_aioice()
                     )
                     pc = room["peers"][ws]
                     await pc.addIceCandidate(cand)
@@ -148,7 +157,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str,
                 pend   = next((w for w in room["waiting"]
                                if id(w) == target), None)
                 if pend:
-                    await do_admit(pend, room)
+                    await admit(pend, room)
 
             elif t == "material_event" and ws in room["admins"]:
                 for p in room["peers"]:
