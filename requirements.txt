@@ -1,0 +1,4 @@
+fastapi
+uvicorn[standard]
+aiortc==1.13
+PyJWT
