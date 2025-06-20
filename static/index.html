@@ -2,23 +2,20 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Voice+Chat Room</title>
+  <title>Voice + Chat Room</title>
   <style>
     body { font-family: sans-serif; }
-    #waiting,#chat,#controls,#material { margin: 1em; }
+    #waiting, #chat, #controls, #material { margin: 1em; }
   </style>
 </head>
 <body>
   <h1>Training Room</h1>
 
-  <div id="waiting" style="display:none;">
-    Waiting for admin to admit…
-  </div>
+  <div id="waiting">Waiting for admin to admit…</div>
 
   <div id="controls" style="display:none;">
     <button id="admitBtn">(Admin) Admit Selected</button>
-    <select id="waitingList"></select>
-    <br/><br/>
+    <select id="waitingList"></select><br/><br/>
     <button id="nextSlide">Next Slide</button>
     <button id="startQuiz">Start Quiz</button>
   </div>
@@ -31,15 +28,14 @@
   </div>
 
   <script>
-    // ————— parameters ——————————————————————————————
-    const token  = prompt("Enter your JWT token");
+    // —————————————————————————
+    // 1) WebSocket + ICE Configuration
+    // —————————————————————————
+    const token  = prompt("Enter token (admin or user JWT)");
     const roomId = "room123";
     const proto  = location.protocol === "https:" ? "wss" : "ws";
-    const ws     = new WebSocket(
-      `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`
-    );
+    const ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    // must match server ICE_SERVERS
     const ICE_SERVERS = [
       { urls: ["stun:stun.l.google.com:19302"] },
       { urls: ["stun:global.stun.twilio.com:3478"] }
@@ -47,13 +43,12 @@
 
     let pc, localStream;
 
+    // —————————————————————————
+    // 2) Handle incoming WS messages
+    // —————————————————————————
     ws.onmessage = async ({ data }) => {
-      const msg = JSON.parse(data);
+      let msg = JSON.parse(data);
       switch (msg.type) {
-        case "waiting":
-          document.getElementById("waiting").style.display = "block";
-          break;
-
         case "new_waiting":
           const sel = document.getElementById("waitingList");
           const opt = document.createElement("option");
@@ -62,17 +57,21 @@
           sel.appendChild(opt);
           break;
 
+        case "waiting":
+          document.getElementById("waiting").style.display = "block";
+          break;
+
         case "admitted":
         case "ready_for_offer":
-          document.getElementById("waiting").style.display = "none";
-          document.getElementById("chat").style.display    = "block";
-          document.getElementById("controls").style.display = role() === "admin" ? "block" : "none";
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
+          document.getElementById("controls").style.display = tokenRole() === "admin" ? "block" : "none";
           await startWebRTC();
           break;
 
         case "answer":
           await pc.setRemoteDescription(
-            new RTCSessionDescription({ type:"answer", sdp: msg.sdp })
+            new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
           );
           break;
 
@@ -90,32 +89,33 @@
           break;
 
         case "material_event":
-          const mat = document.getElementById("material");
-          if (msg.event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
-          if (msg.event === "start_quiz")
-            mat.innerHTML += `<p>❓ Quiz ${msg.payload.quizId}</p>`;
+          handleMaterial(msg.event, msg.payload);
           break;
       }
     };
 
+    // —————————————————————————
+    // 3) WebRTC setup & negotiation
+    // —————————————————————————
     async function startWebRTC() {
       if (pc) return;  // only once
 
-      // 1) get mic
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (err) {
-        alert("Microphone access required");
-        return;
+      } catch (e) {
+        return alert("Mic access required: " + e.message);
       }
 
-      // 2) make PeerConnection
       pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+      // send any local ICE candidates to server
       pc.onicecandidate = e => {
         if (e.candidate) {
-          ws.send(JSON.stringify({ type:"ice", candidate: e.candidate.toJSON() }));
+          ws.send(JSON.stringify({ type: "ice", candidate: e.candidate.toJSON() }));
         }
       };
+
+      // play any incoming audio
       pc.ontrack = e => {
         const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
@@ -123,44 +123,54 @@
         document.body.appendChild(audio);
       };
 
-      // 3) attach mic
+      // add mic to the connection
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-      // 4) negotiate
+      // create + send the SDP offer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({ type:"offer", sdp: offer.sdp }));
+      ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
     }
 
-    // — chat & controls ———————————————————————————————————
+    // —————————————————————————
+    // 4) Chat & Admin controls
+    // —————————————————————————
     document.getElementById("sendBtn").onclick = () => {
       const text = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({ type:"chat", from: role(), text }));
+      ws.send(JSON.stringify({ type: "chat", from: tokenRole(), text }));
       document.getElementById("msgIn").value = "";
     };
 
     document.getElementById("admitBtn").onclick = () => {
-      const pid = Number(document.getElementById("waitingList").value);
-      ws.send(JSON.stringify({ type:"admit", peer_id: pid }));
+      const peerId = Number(document.getElementById("waitingList").value);
+      ws.send(JSON.stringify({ type: "admit", peer_id: peerId }));
     };
 
-    document.getElementById("nextSlide").onclick = () =>
-      ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
-
-    document.getElementById("startQuiz").onclick = () =>
+    document.getElementById("nextSlide").onclick = () => {
+      ws.send(JSON.stringify({ type: "material_event", event: "next_slide" }));
+    };
+    document.getElementById("startQuiz").onclick = () => {
       ws.send(JSON.stringify({
-        type:"material_event",
-        event:"start_quiz",
-        payload:{ quizId: 42 }
+        type: "material_event",
+        event: "start_quiz",
+        payload: { quizId: 42 }
       }));
+    };
 
-    // — utilities —————————————————————————————————————————
-    function role() {
+    // —————————————————————————
+    // Helpers
+    // —————————————————————————
+    function tokenRole() {
       try {
         return JSON.parse(atob(token.split(".")[1])).role;
       } catch {
         return "user";
       }
+    }
+    function handleMaterial(event, payload) {
+      const mat = document.getElementById("material");
+      if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
+      if (event === "start_quiz") mat.innerHTML += `<p>❓ Quiz ${payload.quizId} started!</p>`;
     }
   </script>
 </body>
