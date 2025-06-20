@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 aiortc==1.13
 PyJWT
+twilio==8.0.0
