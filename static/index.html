@@ -2,12 +2,12 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Voice+Chat Room</title>
+  <title>Voice + Chat Room</title>
   <style>
     body { font-family: sans-serif; }
     #waiting, #chat, #controls, #material { margin: 1em; }
     #controls { display: none; }
-    #chat { display: none; }
+    #chat     { display: none; }
   </style>
 </head>
 <body>
@@ -32,24 +32,26 @@
 
   <script>
     // ———————————————
-    // 1) Fetch Twilio ICE servers
+    // 1) WebSocket setup
     // ———————————————
-    async function getIceServers() {
-      const res = await fetch("/token");
-      const json = await res.json();
-      return json.iceServers;
-    }
-
-    // ———————————————
-    // 2) WebSocket setup
-    // ———————————————
-    const token  = prompt("Enter JWT token (admin/user)");
+    const token  = prompt("Enter token (admin or user JWT)");
     const roomId = "room123";
-    const scheme = location.protocol === "https:" ? "wss" : "ws";
-    const ws     = new WebSocket(`${scheme}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+    const proto  = location.protocol === "https:" ? "wss" : "ws";
+    const ws     = new WebSocket(
+      `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`
+    );
+
+    // your STUN/TURN servers
+    const ICE_SERVERS = [
+      { urls: ["stun:stun.l.google.com:19302"] },
+      { urls: ["stun:global.stun.twilio.com:3478"] }
+    ];
 
     let pc, localStream;
 
+    // ———————————————
+    // 2) Handle incoming WS messages
+    // ———————————————
     ws.onmessage = async ({ data }) => {
       const msg = JSON.parse(data);
       switch (msg.type) {
@@ -68,15 +70,22 @@
           break;
 
         case "admitted":
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
+          document.getElementById("controls").style.display = tokenRole() === "admin"
+            ? "block"
+            : "none";
+          break;
+
         case "ready_for_offer":
-          document.getElementById("waiting").style.display = "none";
-          document.getElementById("chat").style.display    = "block";
-          document.getElementById("controls").style.display = tokenRole() === "admin" ? "block" : "none";
+          // only here do we start the SDP handshake
           await startWebRTC();
           break;
 
         case "answer":
-          await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: msg.sdp }));
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
+          );
           break;
 
         case "ice":
@@ -104,10 +113,6 @@
     async function startWebRTC() {
       if (pc) return;
 
-      // 3.1) fetch TURN/STUN from Twilio
-      const ICE_SERVERS = await getIceServers();
-
-      // 3.2) get mic
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
@@ -115,7 +120,6 @@
         return;
       }
 
-      // 3.3) create peer
       pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pc.onicecandidate = e => {
         if (e.candidate) {
@@ -125,21 +129,19 @@
       pc.ontrack = e => {
         const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
-        audio.autoplay = true;
+        audio.autoplay  = true;
         document.body.appendChild(audio);
       };
 
-      // 3.4) attach local audio
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-      // 3.5) offer/answer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
     }
 
     // ———————————————
-    // 4) Chat & Controls
+    // 4) Chat & admin controls
     // ———————————————
     document.getElementById("sendBtn").onclick = () => {
       const txt = document.getElementById("msgIn").value;
@@ -177,7 +179,8 @@
     function handleMaterial(event, payload) {
       const mat = document.getElementById("material");
       if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
-      if (event === "start_quiz") mat.innerHTML += `<p>❓ Quiz ${payload.quizId} started!</p>`;
+      if (event === "start_quiz")
+        mat.innerHTML += `<p>❓ Quiz ${payload.quizId} started!</p>`;
     }
   </script>
 </body>
