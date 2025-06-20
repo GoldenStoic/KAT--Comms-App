@@ -5,7 +5,7 @@
   <title>Voice + Chat Room</title>
   <style>
     body { font-family: sans-serif; }
-    #waiting, #chat, #controls, #material { margin: 1em; }
+    #waiting,#chat,#controls,#material { margin: 1em; }
   </style>
 </head>
 <body>
@@ -28,9 +28,6 @@
   </div>
 
   <script>
-    // —————————————————————————
-    // 1) WebSocket + ICE Configuration
-    // —————————————————————————
     const token  = prompt("Enter token (admin or user JWT)");
     const roomId = "room123";
     const proto  = location.protocol === "https:" ? "wss" : "ws";
@@ -43,11 +40,9 @@
 
     let pc, localStream;
 
-    // —————————————————————————
-    // 2) Handle incoming WS messages
-    // —————————————————————————
     ws.onmessage = async ({ data }) => {
-      let msg = JSON.parse(data);
+      const msg = JSON.parse(data);
+
       switch (msg.type) {
         case "new_waiting":
           const sel = document.getElementById("waitingList");
@@ -62,10 +57,15 @@
           break;
 
         case "admitted":
-        case "ready_for_offer":
+          // only update the UI—don't start negotiate here
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
-          document.getElementById("controls").style.display = tokenRole() === "admin" ? "block" : "none";
+          document.getElementById("controls").style.display =
+            tokenRole() === "admin" ? "block" : "none";
+          break;
+
+        case "ready_for_offer":
+          // now we do the WebRTC dance exactly once
           await startWebRTC();
           break;
 
@@ -94,11 +94,8 @@
       }
     };
 
-    // —————————————————————————
-    // 3) WebRTC setup & negotiation
-    // —————————————————————————
     async function startWebRTC() {
-      if (pc) return;  // only once
+      if (pc) return;  // guard against double-runs
 
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -108,14 +105,11 @@
 
       pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
-      // send any local ICE candidates to server
       pc.onicecandidate = e => {
         if (e.candidate) {
           ws.send(JSON.stringify({ type: "ice", candidate: e.candidate.toJSON() }));
         }
       };
-
-      // play any incoming audio
       pc.ontrack = e => {
         const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
@@ -123,18 +117,13 @@
         document.body.appendChild(audio);
       };
 
-      // add mic to the connection
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-      // create + send the SDP offer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
     }
 
-    // —————————————————————————
-    // 4) Chat & Admin controls
-    // —————————————————————————
     document.getElementById("sendBtn").onclick = () => {
       const text = document.getElementById("msgIn").value;
       ws.send(JSON.stringify({ type: "chat", from: tokenRole(), text }));
@@ -157,20 +146,14 @@
       }));
     };
 
-    // —————————————————————————
-    // Helpers
-    // —————————————————————————
     function tokenRole() {
-      try {
-        return JSON.parse(atob(token.split(".")[1])).role;
-      } catch {
-        return "user";
-      }
+      try { return JSON.parse(atob(token.split(".")[1])).role }
+      catch { return "user" }
     }
     function handleMaterial(event, payload) {
       const mat = document.getElementById("material");
-      if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
-      if (event === "start_quiz") mat.innerHTML += `<p>❓ Quiz ${payload.quizId} started!</p>`;
+      if (event==="next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
+      if (event==="start_quiz") mat.innerHTML += `<p>❓ Quiz ${payload.quizId} started!</p>`;
     }
   </script>
 </body>
