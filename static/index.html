@@ -13,6 +13,7 @@
   <h1>Training Room</h1>
 
   <div id="waiting">Waiting for admin to admit…</div>
+
   <div id="controls">
     <button id="admitBtn">(Admin) Admit Selected</button>
     <select id="waitingList"></select><br/><br/>
@@ -28,13 +29,15 @@
   </div>
 
   <script>
-    const token  = prompt("Enter JWT token (admin or user)");
-    const proto  = location.protocol === "https:" ? "wss" : "ws";
-    const ws     = new WebSocket(`${proto}://${location.host}/ws/room123?token=${encodeURIComponent(token)}`);
+    // Prompt for your JWT (admin or user)
+    const token = prompt("Enter JWT token (admin or user)");
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws    = new WebSocket(`${proto}://${location.host}/ws/room123?token=${encodeURIComponent(token)}`);
 
+    // ← Removed the invalid "?transport=udp" here
     const ICE_SERVERS = [
       { urls: ["stun:stun.l.google.com:19302"] },
-      { urls: ["stun:global.stun.twilio.com:3478?transport=udp"] }
+      { urls: ["stun:global.stun.twilio.com:3478"] }
     ];
 
     let pc, localStream;
