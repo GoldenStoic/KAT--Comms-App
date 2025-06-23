@@ -35,14 +35,14 @@
     const wsUrl  = `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`;
     const ws     = new WebSocket(wsUrl);
 
-    // pick up from your server-side ICE_SERVERS env if you like,
-    // but for quick testing you can hard-code:
+    // for quick testing you can hard-code your STUN/TURN here
     const ICE_SERVERS = [
       { urls: ["stun:stun.l.google.com:19302"] },
       // { urls: ["turn:your.turn.host:3478?transport=udp"], username:"...", credential:"..." }
     ];
 
     let pc, localStream;
+    let hasOffered = false;  // ← guard so we only ever send ONE offer
 
     ws.onmessage = async ({ data }) => {
       let msg;
@@ -63,22 +63,27 @@
           break;
 
         case "admitted":
-          // just reveal the UI for admins or users when admitted
+          // just flip the UI—no WebRTC yet
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
           break;
 
         case "ready_for_offer":
-          // now we really start WebRTC once the server is ready
+          // only once!
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
-          await startWebRTC();
+          if (!hasOffered) {
+            hasOffered = true;
+            await startWebRTC();
+          }
           break;
 
         case "answer":
-          await pc.setRemoteDescription(new RTCSessionDescription({ type:"answer", sdp:msg.sdp }));
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({ type:"answer", sdp:msg.sdp })
+          );
           break;
 
         case "ice":
@@ -102,7 +107,6 @@
     };
 
     async function startWebRTC() {
-      if (pc) return;
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
