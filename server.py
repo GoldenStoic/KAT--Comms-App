@@ -41,12 +41,20 @@ relay = MediaRelay()
 
 app = FastAPI()
 
+# ─── Utility to normalize a Twilio ice_server dict  ───────────────────────────
+def normalize_ice_server(s: dict) -> dict:
+    # Twilio might return 'url' instead of 'urls'
+    d = dict(s)
+    if "url" in d and "urls" not in d:
+        d["urls"] = [d.pop("url")]
+    return d
+
 # ─── ICE endpoint for clients to fetch Twilio STUN/TURN ────────────────────────
 @app.get("/ice")
 async def ice():
     token = twilio_client.tokens.create()
-    # token.ice_servers is a list of dicts: {urls, username, credential}
-    return JSONResponse(token.ice_servers)
+    servers = [normalize_ice_server(s) for s in token.ice_servers]
+    return JSONResponse(servers)
 
 # ─── Serve the client page ────────────────────────────────────────────────────
 @app.get("/")
@@ -71,9 +79,11 @@ async def _admit(ws: WebSocket, room_id: str):
     state["waiting"].discard(ws)
     await ws.send_json({"type": "admitted", "peer_id": id(ws)})
 
-    # Generate fresh STUN/TURN creds for this peer
     token = twilio_client.tokens.create()
-    rtc_ice_servers = [RTCIceServer(**s) for s in token.ice_servers]
+    rtc_ice_servers = []
+    for s in token.ice_servers:
+        srv = normalize_ice_server(s)
+        rtc_ice_servers.append(RTCIceServer(**srv))
     config = RTCConfiguration(iceServers=rtc_ice_servers)
 
     pc = RTCPeerConnection(configuration=config)
@@ -84,16 +94,13 @@ async def _admit(ws: WebSocket, room_id: str):
         if track.kind == "audio":
             relay_track = relay.subscribe(track)
             state["audio_tracks"].append(relay_track)
-            # fan-out to existing peers
             for other in state["peers"].values():
                 if other is not pc:
                     other.addTrack(relay_track)
 
-    # forward any previously published audio
     for t in state["audio_tracks"]:
         pc.addTrack(t)
 
-    # signal client to start its offer
     await ws.send_json({"type": "ready_for_offer"})
 
 # ─── WebSocket signaling endpoint ─────────────────────────────────────────────
@@ -109,20 +116,17 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
         {"admins": set(), "waiting": set(), "peers": {}, "audio_tracks": []}
     )
 
-    # Admin path
     if role == "admin":
         state["admins"].add(ws)
         print(f"[ws] admitting admin {id(ws)}")
         await _admit(ws, room_id)
         for pending in state["waiting"]:
             await ws.send_json({"type":"new_waiting","peer_id":id(pending)})
-    # User path
     else:
         state["waiting"].add(ws)
         await ws.send_json({"type":"waiting"})
         for admin_ws in state["admins"]:
             await admin_ws.send_json({"type":"new_waiting","peer_id":id(ws)})
-        # block until admin admits
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
         print(f"[ws] user admitted {id(ws)}")
@@ -142,16 +146,15 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
 
             elif typ == "ice":
                 pc = state["peers"][ws]
-                c  = msg["candidate"]
-                cand_str = c["candidate"]
-                parts    = cand_str.split()
-                foundation = parts[0].split(":",1)[1]
-                component  = int(parts[1])
-                protocol   = parts[2].lower()
-                priority   = int(parts[3])
-                ip         = parts[4]
-                port       = int(parts[5])
-                cand_type  = parts[7]
+                c = msg["candidate"]
+                cand_str = c["candidate"].split()
+                foundation = cand_str[0].split(":",1)[1]
+                component  = int(cand_str[1])
+                protocol   = cand_str[2].lower()
+                priority   = int(cand_str[3])
+                ip         = cand_str[4]
+                port       = int(cand_str[5])
+                cand_type  = cand_str[7]
 
                 ice = RTCIceCandidate(
                     foundation=foundation,
@@ -167,7 +170,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 try:
                     await pc.addIceCandidate(ice)
                 except Exception:
-                    pass  # ignore if transport already closed
+                    pass
 
             elif typ == "chat":
                 for peer in state["peers"]:
