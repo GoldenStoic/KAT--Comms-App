@@ -40,26 +40,24 @@
     let ICE_SERVERS = [], pc, localStream, hasOffered = false;
 
     async function loadIceServers() {
-      console.log("🔍 Fetching ICE servers");
       const res = await fetch("/ice");
-      ICE_SERVERS  = await res.json();
+      ICE_SERVERS = await res.json();
       console.log("✅ ICE_SERVERS:", ICE_SERVERS);
     }
 
-    ws.onopen   = ()=>console.log("🔗 WS connected");
-    ws.onclose  = ()=>console.log("🔌 WS closed");
+    ws.onopen    = ()=>console.log("🔗 WS connected");
+    ws.onclose   = ()=>console.log("🔌 WS closed");
     ws.onmessage = async ({data})=>{
       const msg = JSON.parse(data);
-      console.log("📩", msg.type, msg);
+      console.log("📩", msg);
       switch(msg.type){
         case "waiting":
-          document.getElementById("waiting").style.display="block";
-          break;
+          document.getElementById("waiting").style.display="block"; break;
         case "new_waiting":
           document.getElementById("controls").style.display="block";
-          const o=document.createElement("option");
-          o.value=msg.peer_id; o.text=`User ${msg.peer_id}`;
-          document.getElementById("waitingList").append(o);
+          const opt=document.createElement("option");
+          opt.value=msg.peer_id; opt.text=`User ${msg.peer_id}`;
+          document.getElementById("waitingList").append(opt);
           break;
         case "admitted":
           document.getElementById("waiting").style.display="none";
@@ -76,11 +74,11 @@
           }
           break;
         case "answer":
-          console.log("🔄 setRemoteDescription");
+          console.log("🔄 setting answer");
           await pc.setRemoteDescription({type:"answer",sdp:msg.sdp});
           break;
         case "ice":
-          console.log("💧 addIceCandidate");
+          console.log("💧 adding ICE");
           await pc.addIceCandidate(msg.candidate);
           break;
         case "chat":
@@ -96,8 +94,8 @@
 
     async function startWebRTC(){
       localStream = await navigator.mediaDevices.getUserMedia({audio:true});
-      pc = new RTCPeerConnection({ iceServers:ICE_SERVERS });
-      console.log("🛠  PC created");
+      pc = new RTCPeerConnection({iceServers:ICE_SERVERS});
+      console.log("🛠 PC created");
 
       pc.onicecandidate = e=>{
         if(e.candidate) ws.send(JSON.stringify({type:"ice",candidate:e.candidate.toJSON()}));
@@ -110,7 +108,6 @@
         a.onplaying=()=>console.log("▶️ onplaying");
         document.body.append(a);
       };
-
       localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
 
       pc.onnegotiationneeded = async ()=>{

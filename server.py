@@ -14,24 +14,22 @@ from aiortc import (
 )
 from aiortc.contrib.media import MediaRelay
 
-# ─── Configuration ───────────────────────────────────────────────────────────
+# ─── Config ──────────────────────────────────────────────────────────────────
 JWT_SECRET        = os.getenv("JWT_SECRET", "change-this-to-a-strong-secret")
 TW_ACCOUNT_SID    = os.environ["TWILIO_ACCOUNT_SID"]
 TW_API_KEY_SID    = os.environ["TWILIO_API_KEY_SID"]
 TW_API_KEY_SECRET = os.environ["TWILIO_API_KEY_SECRET"]
 
 twilio = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
-# limit relay to a single-frame queue → drops everything older
-relay  = MediaRelay(max_queue_size=1)
+relay  = MediaRelay()  # no max_queue_size arg
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
+# room state: room_id → { admins:set, waiting:set, peers:dict }
 rooms = {}
 
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
 def normalize_ice_server(s: dict) -> dict:
     d = dict(s)
     if "url" in d:
@@ -40,17 +38,16 @@ def normalize_ice_server(s: dict) -> dict:
 
 async def authenticate(token: str):
     try:
-        data = jwt.decode(token or "", JWT_SECRET, algorithms=["HS256"])
-        return data.get("role", "user")
+        payload = jwt.decode(token or "", JWT_SECRET, algorithms=["HS256"])
+        return payload.get("role", "user")
     except:
         return "user"
 
 
-# ─── REST Endpoints ─────────────────────────────────────────────────────────
 @app.get("/ice")
 async def ice():
-    token   = twilio.tokens.create()
-    servers = [normalize_ice_server(s) for s in token.ice_servers]
+    token_obj = twilio.tokens.create()
+    servers = [normalize_ice_server(s) for s in token_obj.ice_servers]
     return JSONResponse(servers)
 
 @app.get("/")
@@ -58,35 +55,31 @@ async def index():
     return FileResponse("static/index.html")
 
 
-# ─── Signaling ──────────────────────────────────────────────────────────────
 async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
     await ws.send_json({"type":"admitted","peer_id":id(ws)})
 
-    # fetch fresh STUN/TURN
-    token   = twilio.tokens.create()
-    servs   = [normalize_ice_server(s) for s in token.ice_servers]
-    rtc_ice = [RTCIceServer(**s) for s in servs]
+    # get fresh STUN/TURN
+    token_obj = twilio.tokens.create()
+    ice_configs = [normalize_ice_server(s) for s in token_obj.ice_servers]
+    rtc_ice = [RTCIceServer(**c) for c in ice_configs]
     config  = RTCConfiguration(iceServers=rtc_ice)
 
     pc = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
-    # immediately forward any _existing_ relay subscriptions
-    for rt in state["audio_tracks"]:
-        pc.addTrack(rt)
-
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
-            # subscribe _once_ (1-frame queue)
+            # subscribe once; no backlog
             r = relay.subscribe(track)
-            state["audio_tracks"].append(r)
+            # fan-out only new frames to all other peers
             for other_pc in state["peers"].values():
                 if other_pc is not pc:
                     other_pc.addTrack(r)
 
+    # signal client to start negotiation
     await ws.send_json({"type":"ready_for_offer"})
 
 
@@ -96,7 +89,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
     role  = await authenticate(ws.query_params.get("token",""))
     state = rooms.setdefault(
         room_id,
-        {"admins":set(), "waiting":set(), "peers":{}, "audio_tracks":[]}
+        {"admins":set(), "waiting":set(), "peers":{}}
     )
 
     if role == "admin":
@@ -109,6 +102,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
         await ws.send_json({"type":"waiting"})
         for adm in state["admins"]:
             await adm.send_json({"type":"new_waiting","peer_id":id(ws)})
+        # wait until admin admits
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
 
@@ -154,9 +148,9 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
 
             elif typ == "admit" and ws in state["admins"]:
                 target = msg["peer_id"]
-                pending = next((w for w in state["waiting"] if id(w)==target), None)
-                if pending:
-                    await _admit(pending, room_id)
+                pend = next((w for w in state["waiting"] if id(w)==target), None)
+                if pend:
+                    await _admit(pend, room_id)
 
             elif typ == "material_event" and ws in state["admins"]:
                 for peer in state["peers"]:
