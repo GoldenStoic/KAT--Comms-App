@@ -1,4 +1,3 @@
-<!-- static/index.html (exactly your full UI + debug hooks) -->
 <!DOCTYPE html>
 <html>
 <head>
@@ -6,8 +5,8 @@
   <title>Voice+Chat Room (Debug Mode)</title>
   <style>
     body { font-family: sans-serif; }
-    #waiting,#chat,#controls,#material { margin:1em }
-    #stats { font-family:monospace; white-space:pre; background:#f0f0f0; padding:1em }
+    #waiting, #chat, #controls, #material { margin: 1em; }
+    #stats { font-family: monospace; white-space: pre; background: #f0f0f0; padding: 1em; }
   </style>
 </head>
 <body>
@@ -26,7 +25,7 @@
   <div id="material"></div>
 
   <div id="chat" style="display:none;">
-    <div id="chatLog" style="height:200px;overflow:auto;border:1px solid #ccc"></div>
+    <div id="chatLog" style="height:200px; overflow:auto; border:1px solid #ccc;"></div>
     <input id="msgIn" placeholder="Message…"/><button id="sendBtn">Send</button>
   </div>
 
@@ -34,140 +33,168 @@
   <div id="stats">No stats yet</div>
 
   <script>
-    const token  = prompt("Enter token (admin/user JWT)"),
-          roomId = "room123",
-          proto  = location.protocol==="https:"?"wss":"ws",
-          ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+    const token   = prompt("Enter token (admin or user JWT)"),
+          roomId  = "room123",
+          proto   = location.protocol === "https:" ? "wss" : "ws",
+          ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    let ICE_SERVERS=[], pc, localStream, hasOffered=false;
+    let ICE_SERVERS = [], pc, localStream, hasOffered = false;
 
-    async function loadIceServers(){
-      console.log("🔍 Fetching ICE servers");
-      const res=await fetch("/ice");
-      ICE_SERVERS=await res.json();
-      console.log("✅ ICE_SERVERS:",ICE_SERVERS);
+    async function loadIceServers() {
+      console.log("🔍 Fetching ICE servers from /ice");
+      const res = await fetch("/ice");
+      ICE_SERVERS = await res.json();
+      console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
-    ws.onopen  =()=>console.log("🔗 WS connected");
-    ws.onclose =()=>console.log("🔌 WS closed");
+    ws.onopen  = () => console.log("🔗 WebSocket connected");
+    ws.onclose = () => console.log("🔌 WebSocket closed");
 
-    ws.onmessage = async ({data})=>{
-      console.log("📩 raw ws msg:",data);
-      let msg; try{ msg=JSON.parse(data) }catch{ return }
-      switch(msg.type){
+    ws.onmessage = async ({ data }) => {
+      console.log("📩 raw ws msg:", data);
+      let msg;
+      try { msg = JSON.parse(data); }
+      catch { console.error("❌ Invalid WS JSON:", data); return; }
+
+      switch (msg.type) {
         case "waiting":
-          document.getElementById("waiting").style.display="block"; break;
+          console.log("⏳ Received 'waiting'");
+          document.getElementById("waiting").style.display = "block";
+          break;
+
         case "new_waiting":
-          document.getElementById("controls").style.display="block";
-          let opt=document.createElement("option");
-          opt.value=msg.peer_id; opt.text=`User ${msg.peer_id}`;
+          console.log("👥 Received 'new_waiting'", msg.peer_id);
+          document.getElementById("controls").style.display = "block";
+          const opt = document.createElement("option");
+          opt.value = msg.peer_id;
+          opt.text  = `User ${msg.peer_id}`;
           document.getElementById("waitingList").appendChild(opt);
           break;
+
         case "admitted":
-          document.getElementById("waiting").style.display="none";
-          document.getElementById("chat").style.display="block";
-          document.getElementById("controls").style.display=(tokenRole()==="admin")?"block":"none";
+          console.log("✅ Admitted — UI unlocked, peer_id:", msg.peer_id);
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
+          document.getElementById("controls").style.display =
+            (tokenRole() === "admin") ? "block" : "none";
           break;
+
         case "ready_for_offer":
-          console.log("📨 ready_for_offer @",performance.now().toFixed(0));
-          if(!hasOffered){
-            hasOffered=true;
+          console.log("📨 ready_for_offer @", performance.now().toFixed(0), "ms");
+          if (!hasOffered) {
+            hasOffered = true;
             await loadIceServers();
             await startWebRTC();
             monitorStats();
           }
           break;
+
         case "answer":
-          console.log("🔄 answer @",performance.now().toFixed(0),pc.signalingState);
-          await pc.setRemoteDescription({type:"answer",sdp:msg.sdp});
+          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms, signalingState before:", pc.signalingState);
+          await pc.setRemoteDescription({ type:"answer", sdp:msg.sdp });
           break;
+
         case "ice":
-          console.log("💧 ICE from server:",msg.candidate);
-          await pc.addIceCandidate(msg.candidate);
+          console.log("💧 Received ICE candidate from server:", msg.candidate);
+          await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           break;
+
         case "chat":
-          document.getElementById("chatLog")
-            .insertAdjacentHTML("beforeend",`<div><b>${msg.from}:</b> ${msg.text}</div>`);
+          console.log("💬 Received chat from", msg.from, ":", msg.text);
+          const log = document.getElementById("chatLog");
+          log.insertAdjacentHTML("beforeend", `<div><b>${msg.from}:</b> ${msg.text}</div>`);
+          log.scrollTop = log.scrollHeight;
           break;
+
         case "material_event":
-          handleMaterial(msg.event,msg.payload);
+          console.log("📚 Received material_event:", msg.event, msg.payload);
+          handleMaterial(msg.event, msg.payload);
           break;
       }
     };
 
-    async function startWebRTC(){
-      localStream = await navigator.mediaDevices.getUserMedia({audio:true});
-      pc = new RTCPeerConnection({iceServers:ICE_SERVERS,iceTransportPolicy:"relay"});
-      console.log("🛠 PC created @",performance.now().toFixed(0));
+    async function startWebRTC() {
+      console.log("🛫 startWebRTC()");
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceTransportPolicy: "relay" });
+      console.log("🔧 RTCPeerConnection created @", performance.now().toFixed(0));
 
-      pc.onicecandidate = e=>{
-        if(e.candidate){
-          ws.send(JSON.stringify({type:"ice",candidate:e.candidate.toJSON()}));
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          console.log("💧 Local ICE candidate:", e.candidate);
+          ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
         }
       };
-      pc.oniceconnectionstatechange = ()=>console.log("🌐 ICE state:",pc.iceConnectionState);
-      pc.onconnectionstatechange    = ()=>console.log("🔗 Conn state:",pc.connectionState);
+      pc.oniceconnectionstatechange = () => console.log("🌐 ICE state:", pc.iceConnectionState);
+      pc.onconnectionstatechange    = () => console.log("🔗 Connection state:", pc.connectionState);
 
-      pc.ontrack = e=>{
-        console.log("🔊 ontrack @",performance.now().toFixed(0));
-        let audio=document.createElement("audio");
-        audio.srcObject=e.streams[0]; audio.autoplay=true;
-        audio.onplaying=()=>console.log("▶️ onplaying @",performance.now().toFixed(0));
+      pc.ontrack = e => {
+        console.log("🔊 ontrack @", performance.now().toFixed(0));
+        const audio = document.createElement("audio");
+        audio.srcObject = e.streams[0];
+        audio.autoplay = true;
+        audio.onplaying = () => console.log("▶️ onplaying @", performance.now().toFixed(0));
         document.body.appendChild(audio);
       };
 
-      localStream.getTracks().forEach(t=>{
-        pc.addTrack(t,localStream);
-        console.log("➕ Added track:",t.kind);
+      localStream.getTracks().forEach(t => {
+        pc.addTrack(t, localStream);
+        console.log("➕ Added local track:", t.kind);
       });
 
-      pc.onnegotiationneeded = async ()=>{
-        console.log("✈️ negotiationneeded @",performance.now().toFixed(0));
+      pc.onnegotiationneeded = async () => {
+        console.log("✈️ negotiationneeded @", performance.now().toFixed(0));
         await pc.setLocalDescription(await pc.createOffer());
-        ws.send(JSON.stringify({type:"offer",sdp:pc.localDescription.sdp}));
+        ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
+        console.log("✉️ Offer sent");
       };
     }
 
-    function monitorStats(){
-      setInterval(async()=>{
-        if(!pc)return;
-        let stats=await pc.getStats(),out="",now=performance.now().toFixed(0);
-        stats.forEach(r=>{
-          if(r.type==="inbound-rtp"&&r.kind==="audio"){
-            let rtt=(r.roundTripTime||r.currentRoundTripTime||0).toFixed(3),
-                jb=(r.jitterBufferDelay||0).toFixed(3),
-                em=r.jitterBufferEmittedCount||0;
-            out+=`⏱ RTT:${rtt}s  jBufDelay:${jb}s  emitCount:${em}\n`;
+    function monitorStats() {
+      setInterval(async () => {
+        if (!pc) return;
+        const stats = await pc.getStats();
+        let out = "", now = performance.now().toFixed(0);
+        stats.forEach(r => {
+          if (r.type === "inbound-rtp" && r.kind === "audio") {
+            const rtt = (r.roundTripTime||r.currentRoundTripTime||0).toFixed(3),
+                  jb  = (r.jitterBufferDelay||0).toFixed(3),
+                  em  = r.jitterBufferEmittedCount||0;
+            out += `⏱ RTT:${rtt}s  jBufDelay:${jb}s  emitCount:${em}\n`;
           }
-          if(r.type==="candidate-pair"&&r.state==="succeeded"){
-            out+=`🔄 cand-pair RTT:${(r.currentRoundTripTime||0).toFixed(3)}s\n`;
+          if (r.type === "candidate-pair" && r.state === "succeeded") {
+            out += `🔄 cand-pair RTT:${(r.currentRoundTripTime||0).toFixed(3)}s\n`;
           }
         });
-        document.getElementById("stats").textContent=`@${now}ms\n`+out;
-      },3000);
+        document.getElementById("stats").textContent = `@${now}ms\n` + out;
+      }, 3000);
     }
 
-    document.getElementById("sendBtn").onclick=()=>{
-      let txt=document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({type:"chat",from:tokenRole(),text:txt}));
+    // UI handlers…
+    document.getElementById("sendBtn").onclick = () => {
+      const txt = document.getElementById("msgIn").value;
+      console.log("📤 Sending chat:", txt);
+      ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text:txt }));
+      document.getElementById("msgIn").value = "";
     };
-    document.getElementById("admitBtn").onclick=()=>{
-      let pid=+document.getElementById("waitingList").value;
-      ws.send(JSON.stringify({type:"admit",peer_id:pid}));
+    document.getElementById("admitBtn").onclick = () => {
+      const pid = +document.getElementById("waitingList").value;
+      console.log("✅ Admin admitting peer_id:", pid);
+      ws.send(JSON.stringify({ type:"admit", peer_id:pid }));
     };
-    document.getElementById("nextSlide").onclick=()=>
-      ws.send(JSON.stringify({type:"material_event",event:"next_slide"}));
-    document.getElementById("startQuiz").onclick=()=>
-      ws.send(JSON.stringify({type:"material_event",event:"start_quiz",payload:{quizId:42}}));
+    document.getElementById("nextSlide").onclick = () =>
+      ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
+    document.getElementById("startQuiz").onclick = () =>
+      ws.send(JSON.stringify({ type:"material_event", event:"start_quiz", payload:{ quizId:42 } }));
 
-    function tokenRole(){
-      try{return JSON.parse(atob(token.split(".")[1])).role;}
-      catch{return"user";}
+    function tokenRole() {
+      try { return JSON.parse(atob(token.split(".")[1])).role; }
+      catch { return "user"; }
     }
-    function handleMaterial(evt,p){
-      const mat=document.getElementById("material");
-      if(evt==="next_slide") mat.innerHTML+="<p>➡️ Next slide</p>";
-      if(evt==="start_quiz") mat.innerHTML+=`<p>❓ Quiz ${p.quizId}</p>`;
+    function handleMaterial(evt,p) {
+      const mat = document.getElementById("material");
+      if (evt==="next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
+      if (evt==="start_quiz") mat.innerHTML += `<p>❓ Quiz ${p.quizId}</p>`;
     }
   </script>
 </body>

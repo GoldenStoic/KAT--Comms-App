@@ -1,6 +1,5 @@
 # server.py
 import os, sys, asyncio, jwt
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,13 +12,12 @@ from aiortc import (
     RTCIceCandidate,
 )
 from aiortc.contrib.media import MediaRelay
-
 from twilio.rest import Client
 
 print(">>> SERVER running under:", sys.executable)
 print(">>> jwt module path:", getattr(jwt, "__file__", None))
 
-# ─── Twilio Setup ─────────────────────────────────────────────────────────────
+# ─── Twilio Network Traversal Setup ───────────────────────────────────────────
 TW_ACCOUNT_SID    = os.environ["TWILIO_ACCOUNT_SID"]
 TW_API_KEY_SID    = os.environ["TWILIO_API_KEY_SID"]
 TW_API_KEY_SECRET = os.environ["TWILIO_API_KEY_SECRET"]
@@ -27,6 +25,7 @@ twilio_client     = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
 
 # grab one token at startup
 initial_token = twilio_client.tokens.create()
+
 def normalize_ice_server(s: dict) -> dict:
     d = dict(s)
     if "url" in d:
@@ -66,13 +65,13 @@ async def _admit(ws: WebSocket, room_id: str):
     state["waiting"].discard(ws)
     await ws.send_json({"type":"admitted","peer_id":id(ws)})
 
-    # build the aiortc PeerConnection with TURN-only
+    # build the aiortc PeerConnection with TURN-only ICE
     rtc_ice = [ RTCIceServer(**s) for s in GLOBAL_ICE ]
     config  = RTCConfiguration(iceServers=rtc_ice)
     pc      = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
-    # **forward any existing relay_tracks** so new peer hears immediately
+    # forward any existing relay_tracks so new peer hears immediately
     for t in state["audio_tracks"]:
         pc.addTrack(t)
 
@@ -116,11 +115,28 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
 
             if typ == "offer":
                 pc = state["peers"][ws]
+                # 1) set the remote offer
                 await pc.setRemoteDescription(
                     RTCSessionDescription(sdp=msg["sdp"], type="offer")
                 )
+                # 2) create answer
                 answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
+
+                # 3) patch SDP: ensure each audio m-line has 'a=sendrecv'
+                lines = answer.sdp.splitlines()
+                new_lines = []
+                for line in lines:
+                    new_lines.append(line)
+                    if line.startswith("m=audio"):
+                        # insert sendrecv immediately after the m=audio line
+                        new_lines.append("a=sendrecv")
+                patched_sdp = "\r\n".join(new_lines) + "\r\n"
+
+                # 4) setLocalDescription with patched SDP
+                await pc.setLocalDescription(
+                    RTCSessionDescription(sdp=patched_sdp, type="answer")
+                )
+                # 5) send it back
                 await ws.send_json({"type":"answer","sdp":pc.localDescription.sdp})
 
             elif typ == "ice":
@@ -138,8 +154,10 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                     sdpMid=c.get("sdpMid"),
                     sdpMLineIndex=c.get("sdpMLineIndex")
                 )
-                try: await pc.addIceCandidate(cand)
-                except: pass
+                try:
+                    await pc.addIceCandidate(cand)
+                except:
+                    pass
 
             elif typ == "chat":
                 for peer in state["peers"]:
