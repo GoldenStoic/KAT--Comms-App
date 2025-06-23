@@ -1,5 +1,8 @@
 # server.py
-import os, sys, asyncio, jwt
+import os
+import asyncio
+import jwt
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,88 +15,80 @@ from aiortc import (
     RTCIceCandidate,
 )
 from aiortc.contrib.media import MediaRelay
+
 from twilio.rest import Client
 
-print(">>> SERVER running under:", sys.executable)
-print(">>> jwt module path:", getattr(jwt, "__file__", None))
-
-# ─── Twilio Network Traversal Setup ───────────────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────
+JWT_SECRET        = os.getenv("JWT_SECRET", "change-this-to-a-strong-secret")
 TW_ACCOUNT_SID    = os.environ["TWILIO_ACCOUNT_SID"]
 TW_API_KEY_SID    = os.environ["TWILIO_API_KEY_SID"]
 TW_API_KEY_SECRET = os.environ["TWILIO_API_KEY_SECRET"]
-twilio_client     = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
 
-# grab one token at startup
-initial_token = twilio_client.tokens.create()
+twilio = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
+relay  = MediaRelay()
 
+app   = FastAPI()
+rooms = {}  # room_id → { admins:set, waiting:set, peers:dict }
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 def normalize_ice_server(s: dict) -> dict:
     d = dict(s)
     if "url" in d:
-        if "urls" not in d:
-            d["urls"] = [d.pop("url")]
-        else:
-            d.pop("url")
+        d.setdefault("urls", [d.pop("url")])
     return d
 
-GLOBAL_ICE = [ normalize_ice_server(s) for s in initial_token.ice_servers ]
+async def authenticate(token: str):
+    try:
+        data = jwt.decode(token or "", JWT_SECRET, algorithms=["HS256"])
+        return data.get("role", "user")
+    except:
+        return "user"
 
-# ─── FastAPI & aiortc state ───────────────────────────────────────────────────
-app        = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
-relay      = MediaRelay()
-rooms      = {}   # room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
-JWT_SECRET = os.getenv("JWT_SECRET", "change-this")
-
+# ─── REST ENDPOINTS ──────────────────────────────────────────────────────────
 @app.get("/ice")
 async def ice():
-    # clients fetch this once
-    return JSONResponse(GLOBAL_ICE)
+    token   = twilio.tokens.create()
+    servers = [normalize_ice_server(s) for s in token.ice_servers]
+    return JSONResponse(servers)
 
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")
 
-async def authenticate(token: str):
-    try:
-        data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return data.get("role", "user")
-    except:
-        return "user"
-
+# ─── SIGNALING ────────────────────────────────────────────────────────────────
 async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
     await ws.send_json({"type":"admitted","peer_id":id(ws)})
 
-    # build the aiortc PeerConnection with TURN-only ICE
-    rtc_ice = [ RTCIceServer(**s) for s in GLOBAL_ICE ]
+    # fresh TURN creds for aiortc
+    token   = twilio.tokens.create()
+    servs   = [normalize_ice_server(s) for s in token.ice_servers]
+    rtc_ice = [RTCIceServer(**s) for s in servs]
     config  = RTCConfiguration(iceServers=rtc_ice)
-    pc      = RTCPeerConnection(configuration=config)
-    state["peers"][ws] = pc
 
-    # forward any existing relay_tracks so new peer hears immediately
-    for t in state["audio_tracks"]:
-        pc.addTrack(t)
+    pc = RTCPeerConnection(configuration=config)
+    state["peers"][ws] = pc
 
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
             relay_track = relay.subscribe(track)
-            state["audio_tracks"].append(relay_track)
+            # forward live frames to all other peers
             for other in state["peers"].values():
                 if other is not pc:
                     other.addTrack(relay_track)
 
+    # signal client to start
     await ws.send_json({"type":"ready_for_offer"})
 
 @app.websocket("/ws/{room_id}")
 async def ws_endpoint(ws: WebSocket, room_id: str):
     await ws.accept()
     role  = await authenticate(ws.query_params.get("token",""))
-    state = rooms.setdefault(
-        room_id,
-        {"admins":set(), "waiting":set(), "peers":{}, "audio_tracks":[]}
-    )
+    state = rooms.setdefault(room_id, {"admins":set(),"waiting":set(),"peers":{}})
 
     if role == "admin":
         state["admins"].add(ws)
@@ -115,35 +110,18 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
 
             if typ == "offer":
                 pc = state["peers"][ws]
-                # 1) set the remote offer
                 await pc.setRemoteDescription(
                     RTCSessionDescription(sdp=msg["sdp"], type="offer")
                 )
-                # 2) create answer
                 answer = await pc.createAnswer()
-
-                # 3) patch SDP: ensure each audio m-line has 'a=sendrecv'
-                lines = answer.sdp.splitlines()
-                new_lines = []
-                for line in lines:
-                    new_lines.append(line)
-                    if line.startswith("m=audio"):
-                        # insert sendrecv immediately after the m=audio line
-                        new_lines.append("a=sendrecv")
-                patched_sdp = "\r\n".join(new_lines) + "\r\n"
-
-                # 4) setLocalDescription with patched SDP
-                await pc.setLocalDescription(
-                    RTCSessionDescription(sdp=patched_sdp, type="answer")
-                )
-                # 5) send it back
+                await pc.setLocalDescription(answer)
                 await ws.send_json({"type":"answer","sdp":pc.localDescription.sdp})
 
             elif typ == "ice":
                 pc = state["peers"][ws]
                 c  = msg["candidate"]
                 parts = c["candidate"].split()
-                cand = RTCIceCandidate(
+                ice = RTCIceCandidate(
                     foundation=parts[0].split(":",1)[1],
                     component=int(parts[1]),
                     protocol=parts[2].lower(),
@@ -155,7 +133,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                     sdpMLineIndex=c.get("sdpMLineIndex")
                 )
                 try:
-                    await pc.addIceCandidate(cand)
+                    await pc.addIceCandidate(ice)
                 except:
                     pass
 
@@ -166,7 +144,8 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                     })
 
             elif typ == "admit" and ws in state["admins"]:
-                pending = next((w for w in state["waiting"] if id(w)==msg["peer_id"]), None)
+                target = msg["peer_id"]
+                pending = next((w for w in state["waiting"] if id(w)==target), None)
                 if pending:
                     await _admit(pending, room_id)
 
@@ -180,6 +159,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
 
     except WebSocketDisconnect:
         pass
+
     finally:
         state["admins"].discard(ws)
         state["waiting"].discard(ws)
