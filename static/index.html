@@ -27,9 +27,9 @@
   </div>
 
   <script>
-    const token  = prompt("JWT token (admin/user)");
+    const token  = prompt("Enter JWT token (admin or user)");
     const roomId = "room123";
-    const proto  = location.protocol==="https:"?"wss":"ws";
+    const proto  = location.protocol==="https:" ? "wss" : "ws";
     const ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
     let pc, localStream;
 
@@ -38,35 +38,46 @@
       switch(msg.type) {
         case "new_waiting":
           const opt = document.createElement("option");
-          opt.value=msg.peer_id; opt.text=`User ${msg.peer_id}`;
+          opt.value = msg.peer_id;
+          opt.text  = `User ${msg.peer_id}`;
           document.getElementById("waitingList").append(opt);
           break;
+
         case "waiting":
           document.getElementById("waiting").style.display="block";
           break;
+
         case "admitted":
         case "ready_for_offer":
           document.getElementById("waiting").style.display="none";
           document.getElementById("chat").style.display="block";
-          document.getElementById("controls").style.display = tokenRole()==="admin"?"block":"none";
+          document.getElementById("controls").style.display = tokenRole()==="admin" ? "block" : "none";
           await startWebRTC();
           break;
+
         case "answer":
-          await pc.setRemoteDescription(new RTCSessionDescription({type:"answer",sdp:msg.sdp}));
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({ type:"answer", sdp:msg.sdp })
+          );
           break;
+
         case "ice":
-          if(pc && msg.candidate) await pc.addIceCandidate(msg.candidate);
+          if(pc && msg.candidate) {
+            await pc.addIceCandidate(msg.candidate);
+          }
           break;
+
         case "chat":
           document.getElementById("chat").style.display="block";
           const log = document.getElementById("chatLog");
-          log.innerHTML+=`<div><b>${msg.from}:</b> ${msg.text}</div>`;
+          log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
           log.scrollTop = log.scrollHeight;
           break;
+
         case "material_event":
-          const mat=document.getElementById("material");
-          if(msg.event==="next_slide") mat.innerHTML+="<p>➡️ Next slide</p>";
-          if(msg.event==="start_quiz") mat.innerHTML+=`<p>❓ Quiz ${msg.payload.quizId}</p>`;
+          const mat = document.getElementById("material");
+          if(msg.event==="next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
+          if(msg.event==="start_quiz") mat.innerHTML += `<p>❓ Quiz ${msg.payload.quizId}</p>`;
           break;
       }
     };
@@ -74,45 +85,55 @@
     async function startWebRTC(){
       if(pc) return;
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({audio:true});
-      } catch(e){
-        return alert("Mic required:"+e.message);
+        localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      } catch(e) {
+        return alert("Microphone access is required: "+e.message);
       }
 
-      // fetch Twilio STUN/TURN list
+      // grab Twilio TURN/STUN list
       const resp = await fetch("/ice_servers");
       const iceServers = await resp.json();
 
-      pc = new RTCPeerConnection({iceServers});
-      pc.onicecandidate = e => e.candidate && ws.send(JSON.stringify({type:"ice",candidate:e.candidate.toJSON()}));
+      pc = new RTCPeerConnection({ iceServers });
+      pc.onicecandidate = e => {
+        if(e.candidate) {
+          ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
+        }
+      };
       pc.ontrack = e => {
         const a = document.createElement("audio");
         a.srcObject = e.streams[0];
-        a.autoplay=true;
+        a.autoplay = true;
         document.body.append(a);
       };
-      localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
 
+      // add mic
+      localStream.getTracks().forEach(t=>pc.addTrack(t, localStream));
+
+      // offer/answer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({type:"offer",sdp:offer.sdp}));
+      ws.send(JSON.stringify({ type:"offer", sdp:offer.sdp }));
     }
 
-    // UI handlers
+    // UI bindings
     document.getElementById("sendBtn").onclick = ()=>{
       const txt = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({type:"chat",from:tokenRole(),text:txt}));
-      document.getElementById("msgIn").value="";
+      ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text:txt }));
+      document.getElementById("msgIn").value = "";
     };
     document.getElementById("admitBtn").onclick = ()=>{
-      const pid=Number(document.getElementById("waitingList").value);
-      ws.send(JSON.stringify({type:"admit",peer_id:pid}));
+      const pid = Number(document.getElementById("waitingList").value);
+      ws.send(JSON.stringify({ type:"admit", peer_id:pid }));
     };
-    document.getElementById("nextSlide").onclick = ()=>ws.send(JSON.stringify({type:"material_event",event:"next_slide"}));
-    document.getElementById("startQuiz").onclick = ()=>ws.send(JSON.stringify({type:"material_event",event:"start_quiz",payload:{quizId:42}}));
+    document.getElementById("nextSlide").onclick = ()=>ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
+    document.getElementById("startQuiz").onclick = ()=>ws.send(JSON.stringify({
+      type:"material_event", event:"start_quiz", payload:{ quizId:42 }
+    }));
 
     function tokenRole(){
-      try{return JSON.parse(atob(token.split('.')[1])).role;}catch{return"user";}
+      try { return JSON.parse(atob(token.split('.')[1])).role; }
+      catch { return "user"; }
     }
   </script>
 </body>
