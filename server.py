@@ -1,11 +1,14 @@
 # server.py
 import os
 import sys
-import jwt
 import asyncio
+import jwt
+import json
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
 from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
@@ -15,31 +18,44 @@ from aiortc import (
 )
 from aiortc.contrib.media import MediaRelay
 
+from twilio.rest import Client
+
 print(">>> SERVER running under:", sys.executable)
 print(">>> jwt module path:", getattr(jwt, "__file__", None))
 
-# --- CONFIG from environment ---
-STUN_URL  = os.getenv("STUN_URL", "stun:stun.l.google.com:19302")
-TURN_URL  = os.getenv("TURN_URL")  # e.g. "turn:your.turn.host:3478?transport=udp"
-TURN_USER = os.getenv("TURN_USER")
-TURN_PASS = os.getenv("TURN_PASS")
+# ─── Twilio Network Traversal Setup ───────────────────────────────────────────
+TW_ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
+TW_API_KEY_SID     = os.getenv("TWILIO_API_KEY_SID")
+TW_API_KEY_SECRET  = os.getenv("TWILIO_API_KEY_SECRET")
+if not (TW_ACCOUNT_SID and TW_API_KEY_SID and TW_API_KEY_SECRET):
+    raise RuntimeError("Twilio credentials not set in environment")
+
+twilio_client = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
+
+# ─── JWT CONFIG ───────────────────────────────────────────────────────────────
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-to-a-strong-secret")
 
-ICE_SERVERS = [{"urls": STUN_URL}]
-if TURN_URL and TURN_USER and TURN_PASS:
-    ICE_SERVERS.append({
-        "urls": TURN_URL,
-        "username": TURN_USER,
-        "credential": TURN_PASS
-    })
-
-# In-memory room state
-rooms = {}  # room_id → {admins, waiting, peers, audio_tracks}
+# ─── In-memory room state ─────────────────────────────────────────────────────
+rooms = {}  # room_id → { admins, waiting, peers, audio_tracks }
 relay = MediaRelay()
 
 app = FastAPI()
 
-# --- Helper: decode JWT ---
+# ─── ICE endpoint for clients to fetch Twilio STUN/TURN ────────────────────────
+@app.get("/ice")
+async def ice():
+    token = twilio_client.tokens.create()
+    # token.ice_servers is a list of dicts: {urls, username, credential}
+    return JSONResponse(token.ice_servers)
+
+# ─── Serve the client page ────────────────────────────────────────────────────
+@app.get("/")
+async def index():
+    return FileResponse("static/index.html")
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ─── JWT authentication helper ────────────────────────────────────────────────
 async def authenticate(token: str):
     try:
         data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
@@ -49,14 +65,15 @@ async def authenticate(token: str):
         print("⚠️ authenticate error:", repr(e))
         return "user"
 
-# --- Admit helper ---
+# ─── Admit helper: sets up an aiortc PeerConnection with Twilio ICE ───────────
 async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
     await ws.send_json({"type": "admitted", "peer_id": id(ws)})
 
-    # Build an RTCConfiguration with our STUN/TURN list
-    rtc_ice_servers = [RTCIceServer(**s) for s in ICE_SERVERS]
+    # Generate fresh STUN/TURN creds for this peer
+    token = twilio_client.tokens.create()
+    rtc_ice_servers = [RTCIceServer(**s) for s in token.ice_servers]
     config = RTCConfiguration(iceServers=rtc_ice_servers)
 
     pc = RTCPeerConnection(configuration=config)
@@ -67,22 +84,19 @@ async def _admit(ws: WebSocket, room_id: str):
         if track.kind == "audio":
             relay_track = relay.subscribe(track)
             state["audio_tracks"].append(relay_track)
+            # fan-out to existing peers
             for other in state["peers"].values():
                 if other is not pc:
                     other.addTrack(relay_track)
 
-    # forward any existing audio
+    # forward any previously published audio
     for t in state["audio_tracks"]:
         pc.addTrack(t)
 
-    # tell client we're ready
+    # signal client to start its offer
     await ws.send_json({"type": "ready_for_offer"})
 
-# --- Serve client ---
-@app.get("/")
-async def index():
-    return FileResponse("static/index.html")
-
+# ─── WebSocket signaling endpoint ─────────────────────────────────────────────
 @app.websocket("/ws/{room_id}")
 async def ws_endpoint(ws: WebSocket, room_id: str):
     await ws.accept()
@@ -90,26 +104,25 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
     role  = await authenticate(token)
     print(f"[ws] conn room={room_id} role={role}")
 
-    state = rooms.setdefault(room_id, {
-        "admins": set(), "waiting": set(),
-        "peers": {}, "audio_tracks": []
-    })
+    state = rooms.setdefault(
+        room_id,
+        {"admins": set(), "waiting": set(), "peers": {}, "audio_tracks": []}
+    )
 
-    # admin or user path
+    # Admin path
     if role == "admin":
         state["admins"].add(ws)
         print(f"[ws] admitting admin {id(ws)}")
         await _admit(ws, room_id)
-        # notify about any waiting users
         for pending in state["waiting"]:
             await ws.send_json({"type":"new_waiting","peer_id":id(pending)})
+    # User path
     else:
         state["waiting"].add(ws)
         await ws.send_json({"type":"waiting"})
         for admin_ws in state["admins"]:
             await admin_ws.send_json({"type":"new_waiting","peer_id":id(ws)})
-        print(f"[ws] user waiting {id(ws)}")
-        # block until admitted
+        # block until admin admits
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
         print(f"[ws] user admitted {id(ws)}")
@@ -132,8 +145,6 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 c  = msg["candidate"]
                 cand_str = c["candidate"]
                 parts    = cand_str.split()
-
-                # proper parsing:
                 foundation = parts[0].split(":",1)[1]
                 component  = int(parts[1])
                 protocol   = parts[2].lower()
@@ -156,7 +167,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 try:
                     await pc.addIceCandidate(ice)
                 except Exception:
-                    pass  # transport may already be closed
+                    pass  # ignore if transport already closed
 
             elif typ == "chat":
                 for peer in state["peers"]:
@@ -182,13 +193,9 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
         pass
 
     finally:
-        # clean up
         state["admins"].discard(ws)
         state["waiting"].discard(ws)
         pc = state["peers"].pop(ws, None)
         if pc:
             await pc.close()
         print(f"[ws] closed {id(ws)}")
-
-# Serve static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
