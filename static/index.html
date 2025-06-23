@@ -29,35 +29,39 @@
   </div>
 
   <script>
-    const token  = prompt("Enter token (admin or user JWT)");
-    const roomId = "room123";
-    const proto  = window.location.protocol === "https:" ? "wss" : "ws";
-    const wsUrl  = `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`;
-    const ws     = new WebSocket(wsUrl);
+    const token   = prompt("Enter token (admin or user JWT)");
+    const roomId  = "room123";
+    const proto   = location.protocol === "https:" ? "wss" : "ws";
+    const ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    // match exactly your Python ICE_SERVERS list (STUN + TURN)
-    const ICE_SERVERS = [
-      { urls: ["stun:stun.l.google.com:19302"] },
-      // { urls: ["turn:your.turn.host:3478?transport=udp"], username:"...", credential:"..." }
-    ];
+    let ICE_SERVERS = [];
+    let pc, localStream, hasOffered = false;
 
-    let pc, localStream;
-    let hasOffered = false;
+    // Fetch ICE servers from our Python /ice endpoint
+    async function loadIceServers() {
+      console.log("🔍 Fetching ICE servers from /ice");
+      const res = await fetch("/ice");
+      ICE_SERVERS = await res.json();
+      console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
+    }
+
+    ws.onopen = () => console.log("🔗 WebSocket connected");
+    ws.onclose= () => console.log("🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
-      // log raw incoming messages
       console.log("📩 raw ws msg:", data);
-
       let msg;
       try { msg = JSON.parse(data); }
-      catch { console.error("Invalid WS JSON:", data); return; }
+      catch { console.error("❌ Invalid WS JSON:", data); return; }
 
       switch (msg.type) {
         case "waiting":
+          console.log("⏳ Received 'waiting'");
           document.getElementById("waiting").style.display = "block";
           break;
 
         case "new_waiting":
+          console.log("👥 Received 'new_waiting'", msg.peer_id);
           const sel = document.getElementById("waitingList");
           const opt = document.createElement("option");
           opt.value = msg.peer_id;
@@ -66,19 +70,22 @@
           break;
 
         case "admitted":
-          console.log("✅ Admitted — UI unlocked");
+          console.log("✅ Admitted — UI unlocked, peer_id:", msg.peer_id);
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
-          document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
+          document.getElementById("controls").style.display =
+            (tokenRole() === "admin") ? "block" : "none";
           break;
 
         case "ready_for_offer":
           console.log("📨 ready_for_offer received");
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
-          document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
+          document.getElementById("controls").style.display =
+            (tokenRole() === "admin") ? "block" : "none";
           if (!hasOffered) {
             hasOffered = true;
+            await loadIceServers();
             await startWebRTC();
           }
           break;
@@ -86,26 +93,33 @@
         case "answer":
           console.log("🔄 Received answer — signalingState before:", pc.signalingState);
           if (pc && pc.signalingState === "have-local-offer") {
-            await pc.setRemoteDescription(
-              new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
-            );
-            console.log("✔️ setRemoteDescription succeeded — state now:", pc.signalingState);
+            try {
+              await pc.setRemoteDescription(
+                new RTCSessionDescription({ type:"answer", sdp:msg.sdp })
+              );
+              console.log("✔️ setRemoteDescription succeeded — state now:", pc.signalingState);
+            } catch(e) {
+              console.error("❌ setRemoteDescription error:", e);
+            }
           } else {
             console.warn("❌ Skipping setRemoteDescription in wrong state:", pc ? pc.signalingState : "no-pc");
           }
           break;
 
         case "ice":
+          console.log("💧 Received ICE candidate from server:", msg.candidate);
           if (pc && msg.candidate) {
             try {
               await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+              console.log("✔️ addIceCandidate succeeded");
             } catch(e) {
-              console.warn("⚠️ addIceCandidate error:", e);
+              console.warn("⚠️ addIceCandidate failed:", e);
             }
           }
           break;
 
         case "chat":
+          console.log("💬 Received chat from", msg.from, ":", msg.text);
           document.getElementById("chat").style.display = "block";
           const log = document.getElementById("chatLog");
           log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
@@ -113,8 +127,12 @@
           break;
 
         case "material_event":
+          console.log("📚 Received material_event:", msg.event, msg.payload);
           handleMaterial(msg.event, msg.payload);
           break;
+
+        default:
+          console.warn("❓ Unknown message type:", msg.type);
       }
     };
 
@@ -122,87 +140,114 @@
       console.log("🛫 startWebRTC()");
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("🎤 getUserMedia succeeded");
       } catch (err) {
+        console.error("❌ getUserMedia failed:", err);
         alert("Microphone access is required: " + err.message);
         return;
       }
 
       pc = new RTCPeerConnection({
         iceServers: ICE_SERVERS,
-        iceTransportPolicy: "relay"   // optional: force TURN-only
+        iceTransportPolicy: "relay"  // optional: force TURN-only
       });
+      console.log("🔧 RTCPeerConnection created, signalingState:", pc.signalingState);
 
       pc.ontrack = e => {
+        console.log("🔊 Remote track received");
         const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
         audio.autoplay = true;
         document.body.appendChild(audio);
       };
+
       pc.onicecandidate = e => {
         if (e.candidate) {
+          console.log("💧 Local ICE candidate:", e.candidate);
           ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
         }
       };
 
-      // add mic track
-      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      // Add local audio tracks
+      localStream.getTracks().forEach(t => {
+        pc.addTrack(t, localStream);
+        console.log("➕ Added local track:", t.kind);
+      });
+      console.log("🎬 Tracks added, signalingState:", pc.signalingState);
 
-      // wait for negotiationneeded
+      // Use negotiationneeded to guarantee correct timing
       pc.onnegotiationneeded = async () => {
-        console.log("🎬 negotiationneeded event");
-        const offer = await pc.createOffer();
-        console.log("✈️ Offer created");
-        await pc.setLocalDescription(offer);
-        console.log("✈️ Local description set — signalingState:", pc.signalingState);
+        console.log("🔄 negotiationneeded event — preparing offer");
+        try {
+          const offer = await pc.createOffer();
+          console.log("✈️ Offer created");
+          await pc.setLocalDescription(offer);
+          console.log("✈️ setLocalDescription done — signalingState:", pc.signalingState);
 
-        // wait for ICE gathering to finish
-        await new Promise(resolve => {
-          if (pc.iceGatheringState === "complete") {
-            resolve();
-          } else {
-            function checkState() {
+          // Wait for ICE gathering to finish
+          await new Promise(resolve => {
+            if (pc.iceGatheringState === "complete") return resolve();
+            function check() {
+              console.log("🕓 ICE gathering state:", pc.iceGatheringState);
               if (pc.iceGatheringState === "complete") {
-                pc.removeEventListener("icegatheringstatechange", checkState);
+                pc.removeEventListener("icegatheringstatechange", check);
                 resolve();
               }
             }
-            pc.addEventListener("icegatheringstatechange", checkState);
-          }
-        });
+            pc.addEventListener("icegatheringstatechange", check);
+          });
 
-        console.log("🎉 ICE gathering complete — sending SDP");
-        ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
-        console.log("✉️ Offer sent");
+          console.log("🎉 ICE gathering complete — sending SDP");
+          ws.send(JSON.stringify({ type:"offer", sdp:pc.localDescription.sdp }));
+          console.log("✉️ Offer sent to server");
+        } catch(e) {
+          console.error("❌ Error during negotiationneeded:", e);
+        }
       };
     }
 
-    // UI event handlers…
+    // UI event handlers
     document.getElementById("sendBtn").onclick = () => {
-      const text = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text }));
+      const txt = document.getElementById("msgIn").value;
+      console.log("📤 Sending chat:", txt);
+      ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text:txt }));
       document.getElementById("msgIn").value = "";
     };
     document.getElementById("admitBtn").onclick = () => {
       const peerId = Number(document.getElementById("waitingList").value);
+      console.log("✅ Admin admitting peer_id:", peerId);
       ws.send(JSON.stringify({ type:"admit", peer_id:peerId }));
     };
     document.getElementById("nextSlide").onclick = () => {
+      console.log("➡️ Sending next_slide event");
       ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
     };
     document.getElementById("startQuiz").onclick = () => {
+      console.log("❓ Sending start_quiz event");
       ws.send(JSON.stringify({
         type:"material_event", event:"start_quiz", payload:{ quizId:42 }
       }));
     };
 
     function tokenRole() {
-      try { return JSON.parse(atob(token.split(".")[1])).role; }
-      catch { return "user"; }
+      try {
+        const role = JSON.parse(atob(token.split(".")[1])).role;
+        console.log("🔑 tokenRole:", role);
+        return role;
+      } catch {
+        console.warn("⚠️ Unable to parse tokenRole, defaulting to user");
+        return "user";
+      }
     }
+
     function handleMaterial(event, payload) {
       const mat = document.getElementById("material");
-      if (event==="next_slide")  mat.innerHTML += "<p>➡️ Next slide</p>";
-      if (event==="start_quiz")  mat.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
+      if (event === "next_slide") {
+        mat.innerHTML += "<p>➡️ Next slide</p>";
+      }
+      if (event === "start_quiz") {
+        mat.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
+      }
     }
   </script>
 </body>
