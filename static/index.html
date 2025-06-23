@@ -63,10 +63,17 @@
           break;
 
         case "admitted":
-        case "ready_for_offer":
+          // just reveal the UI for admins or users when admitted
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
-          document.getElementById("controls").style.display = (tokenRole()==="admin")?"block":"none";
+          document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
+          break;
+
+        case "ready_for_offer":
+          // now we really start WebRTC once the server is ready
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
+          document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
           await startWebRTC();
           break;
 
