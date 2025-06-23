@@ -31,19 +31,24 @@
   <script>
     const token  = prompt("Enter token (admin or user JWT)");
     const roomId = "room123";
-    const proto  = location.protocol === "https:" ? "wss" : "ws";
-    const ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+    const proto  = window.location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl  = `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`;
+    const ws     = new WebSocket(wsUrl);
 
-    let ICE_SERVERS = [];
-    // fetch our TURN/STUN list from server
-    fetch("/ice_servers")
-      .then(r => r.json())
-      .then(j => ICE_SERVERS = j);
+    // pick up from your server-side ICE_SERVERS env if you like,
+    // but for quick testing you can hard-code:
+    const ICE_SERVERS = [
+      { urls: ["stun:stun.l.google.com:19302"] },
+      // { urls: ["turn:your.turn.host:3478?transport=udp"], username:"...", credential:"..." }
+    ];
 
     let pc, localStream;
 
     ws.onmessage = async ({ data }) => {
-      const msg = JSON.parse(data);
+      let msg;
+      try { msg = JSON.parse(data); }
+      catch { console.error("Invalid WS message:", data); return; }
+
       switch (msg.type) {
         case "new_waiting":
           const sel = document.getElementById("waitingList");
@@ -52,30 +57,37 @@
           opt.text  = `User ${msg.peer_id}`;
           sel.appendChild(opt);
           break;
+
         case "waiting":
           document.getElementById("waiting").style.display = "block";
           break;
+
         case "admitted":
         case "ready_for_offer":
-          document.getElementById("waiting").style.display = "none";
-          document.getElementById("chat").style.display    = "block";
-          document.getElementById("controls").style.display = tokenRole() === "admin" ? "block" : "none";
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
+          document.getElementById("controls").style.display = (tokenRole()==="admin")?"block":"none";
           await startWebRTC();
           break;
+
         case "answer":
-          await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+          await pc.setRemoteDescription(new RTCSessionDescription({ type:"answer", sdp:msg.sdp }));
           break;
+
         case "ice":
           if (pc && msg.candidate) {
-            await pc.addIceCandidate(msg.candidate);
+            try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); }
+            catch(e){ console.warn("addIceCandidate failed:", e); }
           }
           break;
+
         case "chat":
           document.getElementById("chat").style.display = "block";
           const log = document.getElementById("chatLog");
           log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
           log.scrollTop = log.scrollHeight;
           break;
+
         case "material_event":
           handleMaterial(msg.event, msg.payload);
           break;
@@ -86,14 +98,15 @@
       if (pc) return;
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch(err) {
-        return alert("Microphone access required: " + err.message);
+      } catch (err) {
+        alert("Microphone access is required: " + err.message);
+        return;
       }
 
       pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       pc.onicecandidate = e => {
         if (e.candidate) {
-          ws.send(JSON.stringify({ type: "ice", candidate: e.candidate.toJSON() }));
+          ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
         }
       };
       pc.ontrack = e => {
@@ -107,26 +120,26 @@
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
+      ws.send(JSON.stringify({ type:"offer", sdp:offer.sdp }));
     }
 
     document.getElementById("sendBtn").onclick = () => {
       const text = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({ type: "chat", from: tokenRole(), text }));
+      ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text }));
       document.getElementById("msgIn").value = "";
     };
+
     document.getElementById("admitBtn").onclick = () => {
       const peerId = Number(document.getElementById("waitingList").value);
-      ws.send(JSON.stringify({ type: "admit", peer_id: peerId }));
+      ws.send(JSON.stringify({ type:"admit", peer_id:peerId }));
     };
+
     document.getElementById("nextSlide").onclick = () => {
-      ws.send(JSON.stringify({ type: "material_event", event: "next_slide" }));
+      ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
     };
     document.getElementById("startQuiz").onclick = () => {
       ws.send(JSON.stringify({
-        type: "material_event",
-        event: "start_quiz",
-        payload: { quizId: 42 }
+        type:"material_event", event:"start_quiz", payload:{ quizId:42 }
       }));
     };
 
@@ -134,10 +147,10 @@
       try { return JSON.parse(atob(token.split(".")[1])).role; }
       catch { return "user"; }
     }
-    function handleMaterial(ev,p) {
-      const m = document.getElementById("material");
-      if (ev==="next_slide")    m.innerHTML += "<p>➡️ Next slide</p>";
-      if (ev==="start_quiz")    m.innerHTML += `<p>❓ Quiz ${p.quizId}</p>`;
+    function handleMaterial(event, payload) {
+      const mat = document.getElementById("material");
+      if (event==="next_slide")  mat.innerHTML += "<p>➡️ Next slide</p>";
+      if (event==="start_quiz")  mat.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
     }
   </script>
 </body>
