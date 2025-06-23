@@ -35,7 +35,6 @@
     const wsUrl  = `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`;
     const ws     = new WebSocket(wsUrl);
 
-    // for quick testing you can hard-code your STUN/TURN here
     const ICE_SERVERS = [
       { urls: ["stun:stun.l.google.com:19302"] },
       // { urls: ["turn:your.turn.host:3478?transport=udp"], username:"...", credential:"..." }
@@ -63,12 +62,14 @@
           break;
 
         case "admitted":
+          console.log("✅ Admitted — UI unlocked");
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
           break;
 
         case "ready_for_offer":
+          console.log("📨 ready_for_offer received");
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
@@ -79,11 +80,12 @@
           break;
 
         case "answer":
-          console.log("🔄 signalingState before answer:", pc.signalingState);
+          console.log("🔄 Received answer — signalingState before:", pc.signalingState);
           if (pc && pc.signalingState === "have-local-offer") {
             await pc.setRemoteDescription(
               new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
             );
+            console.log("✔️ setRemoteDescription succeeded — state now:", pc.signalingState);
           } else {
             console.warn("❌ Skipping setRemoteDescription in wrong state:", pc ? pc.signalingState : "no-pc");
           }
@@ -91,8 +93,11 @@
 
         case "ice":
           if (pc && msg.candidate) {
-            try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); }
-            catch(e){ console.warn("addIceCandidate failed:", e); }
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            } catch(e) {
+              console.warn("⚠️ addIceCandidate error:", e);
+            }
           }
           break;
 
@@ -110,6 +115,7 @@
     };
 
     async function startWebRTC() {
+      console.log("🛫 startWebRTC()");
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
@@ -131,10 +137,15 @@
       };
 
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      console.log("🎬 Tracks added, signalingState:", pc.signalingState);
 
       const offer = await pc.createOffer();
+      console.log("✈️ Offer created, applying locally");
       await pc.setLocalDescription(offer);
+      console.log("✈️ Local description set — signalingState:", pc.signalingState);
+
       ws.send(JSON.stringify({ type:"offer", sdp:offer.sdp }));
+      console.log("✉️ Offer sent to server");
     }
 
     document.getElementById("sendBtn").onclick = () => {
