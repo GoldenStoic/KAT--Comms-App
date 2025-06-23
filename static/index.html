@@ -2,14 +2,15 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Voice+Chat Room</title>
+  <title>Voice+Chat Room (Debug)</title>
   <style>
     body { font-family: sans-serif; }
     #waiting, #chat, #controls, #material { margin: 1em; }
+    #stats { font-family: monospace; white-space: pre; background: #f0f0f0; padding: 1em; }
   </style>
 </head>
 <body>
-  <h1>Training Room</h1>
+  <h1>Training Room (Debug Mode)</h1>
 
   <div id="waiting">Waiting for admin to admit…</div>
 
@@ -28,6 +29,9 @@
     <input id="msgIn" placeholder="Message…"/><button id="sendBtn">Send</button>
   </div>
 
+  <h2>Connection Stats</h2>
+  <div id="stats">No stats yet</div>
+
   <script>
     const token   = prompt("Enter token (admin or user JWT)");
     const roomId  = "room123";
@@ -37,7 +41,6 @@
     let ICE_SERVERS = [];
     let pc, localStream, hasOffered = false;
 
-    // Fetch ICE servers from our Python /ice endpoint
     async function loadIceServers() {
       console.log("🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
@@ -79,10 +82,6 @@
 
         case "ready_for_offer":
           console.log("📨 ready_for_offer received");
-          document.getElementById("waiting").style.display  = "none";
-          document.getElementById("chat").style.display     = "block";
-          document.getElementById("controls").style.display =
-            (tokenRole() === "admin") ? "block" : "none";
           if (!hasOffered) {
             hasOffered = true;
             await loadIceServers();
@@ -120,7 +119,6 @@
 
         case "chat":
           console.log("💬 Received chat from", msg.from, ":", msg.text);
-          document.getElementById("chat").style.display = "block";
           const log = document.getElementById("chatLog");
           log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
           log.scrollTop = log.scrollHeight;
@@ -147,11 +145,16 @@
         return;
       }
 
-      pc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
-        iceTransportPolicy: "relay"  // optional: force TURN-only
-      });
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       console.log("🔧 RTCPeerConnection created, signalingState:", pc.signalingState);
+
+      // log connection state changes
+      pc.oniceconnectionstatechange = () => {
+        console.log("🌐 ICE state:", pc.iceConnectionState);
+      };
+      pc.onconnectionstatechange = () => {
+        console.log("🔗 Connection state:", pc.connectionState);
+      };
 
       pc.ontrack = e => {
         console.log("🔊 Remote track received");
@@ -168,45 +171,53 @@
         }
       };
 
-      // Add local audio tracks
       localStream.getTracks().forEach(t => {
         pc.addTrack(t, localStream);
         console.log("➕ Added local track:", t.kind);
       });
-      console.log("🎬 Tracks added, signalingState:", pc.signalingState);
 
-      // Use negotiationneeded to guarantee correct timing
+      // once negotiationneeded fires, do the offer
       pc.onnegotiationneeded = async () => {
-        console.log("🔄 negotiationneeded event — preparing offer");
+        console.log("🔄 negotiationneeded event");
         try {
           const offer = await pc.createOffer();
           console.log("✈️ Offer created");
           await pc.setLocalDescription(offer);
-          console.log("✈️ setLocalDescription done — signalingState:", pc.signalingState);
+          console.log("✈️ Local desc set — signalingState:", pc.signalingState);
 
-          // Wait for ICE gathering to finish
-          await new Promise(resolve => {
-            if (pc.iceGatheringState === "complete") return resolve();
-            function check() {
-              console.log("🕓 ICE gathering state:", pc.iceGatheringState);
-              if (pc.iceGatheringState === "complete") {
-                pc.removeEventListener("icegatheringstatechange", check);
-                resolve();
-              }
-            }
-            pc.addEventListener("icegatheringstatechange", check);
-          });
+          // start streaming stats once connected
+          monitorStats();
 
-          console.log("🎉 ICE gathering complete — sending SDP");
-          ws.send(JSON.stringify({ type:"offer", sdp:pc.localDescription.sdp }));
+          // trickle ICE: send the SDP immediately, let candidates flow later
+          ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
           console.log("✉️ Offer sent to server");
         } catch(e) {
-          console.error("❌ Error during negotiationneeded:", e);
+          console.error("❌ Error during offer setup:", e);
         }
       };
     }
 
-    // UI event handlers
+    // periodically pull WebRTC stats
+    function monitorStats() {
+      setInterval(async () => {
+        if (!pc) return;
+        const reports = await pc.getStats();
+        let text = "";
+        reports.forEach(r => {
+          if (r.type === "inbound-rtp" && r.kind === "audio") {
+            text += `📥 audio-inbound RTT:${r.roundTripTime?.toFixed(3)}s jitter:${r.jitter}\n`;
+          }
+          if (r.type === "candidate-pair" && r.state === "succeeded") {
+            text += `🔄 cand-pair RTT:${r.currentRoundTripTime?.toFixed(3)}s\n`;
+          }
+        });
+        if (!text) text = "stats not yet available";
+        document.getElementById("stats").textContent = text;
+        console.log("🧮 Stats\n" + text);
+      }, 5000);
+    }
+
+    // UI handlers…
     document.getElementById("sendBtn").onclick = () => {
       const txt = document.getElementById("msgIn").value;
       console.log("📤 Sending chat:", txt);
@@ -239,15 +250,10 @@
         return "user";
       }
     }
-
     function handleMaterial(event, payload) {
       const mat = document.getElementById("material");
-      if (event === "next_slide") {
-        mat.innerHTML += "<p>➡️ Next slide</p>";
-      }
-      if (event === "start_quiz") {
-        mat.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
-      }
+      if (event === "next_slide")  mat.innerHTML += "<p>➡️ Next slide</p>";
+      if (event === "start_quiz")  mat.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
     }
   </script>
 </body>
