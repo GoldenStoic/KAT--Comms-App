@@ -1,8 +1,5 @@
 # server.py
-import os
-import sys
-import asyncio
-import jwt
+import os, sys, asyncio, jwt
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -22,19 +19,17 @@ from twilio.rest import Client
 print(">>> SERVER running under:", sys.executable)
 print(">>> jwt module path:", getattr(jwt, "__file__", None))
 
-# ─── Twilio Network Traversal Setup ───────────────────────────────────────────
+# ─── Twilio Setup ─────────────────────────────────────────────────────────────
 TW_ACCOUNT_SID    = os.environ["TWILIO_ACCOUNT_SID"]
 TW_API_KEY_SID    = os.environ["TWILIO_API_KEY_SID"]
 TW_API_KEY_SECRET = os.environ["TWILIO_API_KEY_SECRET"]
 twilio_client     = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
 
-# ─── Grab one token at startup and reuse it everywhere ────────────────────────
+# grab one token at startup
 initial_token = twilio_client.tokens.create()
-
 def normalize_ice_server(s: dict) -> dict:
     d = dict(s)
     if "url" in d:
-        # promote "url" → ["urls"]
         if "urls" not in d:
             d["urls"] = [d.pop("url")]
         else:
@@ -44,15 +39,15 @@ def normalize_ice_server(s: dict) -> dict:
 GLOBAL_ICE = [ normalize_ice_server(s) for s in initial_token.ice_servers ]
 
 # ─── FastAPI & aiortc state ───────────────────────────────────────────────────
-app       = FastAPI()
-relay     = MediaRelay()
-rooms     = {}   # room_id → { admins:set, waiting:set, peers:dict }
-JWT_SECRET= os.getenv("JWT_SECRET", "change-this")
-
+app        = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
+relay      = MediaRelay()
+rooms      = {}   # room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
+JWT_SECRET = os.getenv("JWT_SECRET", "change-this")
 
 @app.get("/ice")
 async def ice():
+    # clients fetch this once
     return JSONResponse(GLOBAL_ICE)
 
 @app.get("/")
@@ -71,22 +66,25 @@ async def _admit(ws: WebSocket, room_id: str):
     state["waiting"].discard(ws)
     await ws.send_json({"type":"admitted","peer_id":id(ws)})
 
-    # Build aiortc PC with the same GLOBAL_ICE (TURN‐only)
-    rtc_ice_servers = [ RTCIceServer(**s) for s in GLOBAL_ICE ]
-    config          = RTCConfiguration(iceServers=rtc_ice_servers)
-    pc              = RTCPeerConnection(configuration=config)
+    # build the aiortc PeerConnection with TURN-only
+    rtc_ice = [ RTCIceServer(**s) for s in GLOBAL_ICE ]
+    config  = RTCConfiguration(iceServers=rtc_ice)
+    pc      = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
+
+    # **forward any existing relay_tracks** so new peer hears immediately
+    for t in state["audio_tracks"]:
+        pc.addTrack(t)
 
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
             relay_track = relay.subscribe(track)
-            # **only forward new frames**, no backlog**
-            for other_pc in state["peers"].values():
-                if other_pc is not pc:
-                    other_pc.addTrack(relay_track)
+            state["audio_tracks"].append(relay_track)
+            for other in state["peers"].values():
+                if other is not pc:
+                    other.addTrack(relay_track)
 
-    # signal client to send its offer
     await ws.send_json({"type":"ready_for_offer"})
 
 @app.websocket("/ws/{room_id}")
@@ -95,7 +93,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
     role  = await authenticate(ws.query_params.get("token",""))
     state = rooms.setdefault(
         room_id,
-        {"admins":set(), "waiting":set(), "peers":{}}
+        {"admins":set(), "waiting":set(), "peers":{}, "audio_tracks":[]}
     )
 
     if role == "admin":
@@ -140,10 +138,8 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                     sdpMid=c.get("sdpMid"),
                     sdpMLineIndex=c.get("sdpMLineIndex")
                 )
-                try:
-                    await pc.addIceCandidate(cand)
-                except:
-                    pass
+                try: await pc.addIceCandidate(cand)
+                except: pass
 
             elif typ == "chat":
                 for peer in state["peers"]:

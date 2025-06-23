@@ -1,4 +1,4 @@
-<!-- static/index.html -->
+<!-- static/index.html (exactly your full UI + debug hooks) -->
 <!DOCTYPE html>
 <html>
 <head>
@@ -6,8 +6,8 @@
   <title>Voice+Chat Room (Debug Mode)</title>
   <style>
     body { font-family: sans-serif; }
-    #waiting, #chat, #controls, #material { margin: 1em; }
-    #stats { font-family: monospace; white-space: pre; background: #f0f0f0; padding: 1em; }
+    #waiting,#chat,#controls,#material { margin:1em }
+    #stats { font-family:monospace; white-space:pre; background:#f0f0f0; padding:1em }
   </style>
 </head>
 <body>
@@ -17,7 +17,8 @@
 
   <div id="controls" style="display:none;">
     <button id="admitBtn">(Admin) Admit Selected</button>
-    <select id="waitingList"></select><br/><br/>
+    <select id="waitingList"></select>
+    <br/><br/>
     <button id="nextSlide">Next Slide</button>
     <button id="startQuiz">Start Quiz</button>
   </div>
@@ -25,7 +26,7 @@
   <div id="material"></div>
 
   <div id="chat" style="display:none;">
-    <div id="chatLog" style="height:200px; overflow:auto; border:1px solid #ccc;"></div>
+    <div id="chatLog" style="height:200px;overflow:auto;border:1px solid #ccc"></div>
     <input id="msgIn" placeholder="Message…"/><button id="sendBtn">Send</button>
   </div>
 
@@ -33,32 +34,29 @@
   <div id="stats">No stats yet</div>
 
   <script>
-    const token  = prompt("Enter token (admin or user JWT)");
-    const roomId = "room123";
-    const proto  = location.protocol==="https:"?"wss":"ws";
-    const ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+    const token  = prompt("Enter token (admin/user JWT)"),
+          roomId = "room123",
+          proto  = location.protocol==="https:"?"wss":"ws",
+          ws     = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    let ICE_SERVERS = [], pc, localStream, hasOffered=false;
+    let ICE_SERVERS=[], pc, localStream, hasOffered=false;
 
     async function loadIceServers(){
-      console.log("🔍 Fetching ICE servers from /ice");
-      const res = await fetch("/ice");
-      ICE_SERVERS = await res.json();
-      console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
+      console.log("🔍 Fetching ICE servers");
+      const res=await fetch("/ice");
+      ICE_SERVERS=await res.json();
+      console.log("✅ ICE_SERVERS:",ICE_SERVERS);
     }
 
-    ws.onopen  =()=>console.log("🔗 WebSocket connected");
-    ws.onclose =()=>console.log("🔌 WebSocket closed");
+    ws.onopen  =()=>console.log("🔗 WS connected");
+    ws.onclose =()=>console.log("🔌 WS closed");
 
     ws.onmessage = async ({data})=>{
       console.log("📩 raw ws msg:",data);
-      let msg;
-      try { msg=JSON.parse(data) } catch { console.error("❌ Invalid JSON",data); return }
-
+      let msg; try{ msg=JSON.parse(data) }catch{ return }
       switch(msg.type){
         case "waiting":
-          document.getElementById("waiting").style.display="block";
-          break;
+          document.getElementById("waiting").style.display="block"; break;
         case "new_waiting":
           document.getElementById("controls").style.display="block";
           let opt=document.createElement("option");
@@ -71,7 +69,7 @@
           document.getElementById("controls").style.display=(tokenRole()==="admin")?"block":"none";
           break;
         case "ready_for_offer":
-          console.log("📨 ready_for_offer @",performance.now().toFixed(0),"ms");
+          console.log("📨 ready_for_offer @",performance.now().toFixed(0));
           if(!hasOffered){
             hasOffered=true;
             await loadIceServers();
@@ -80,11 +78,11 @@
           }
           break;
         case "answer":
-          console.log("🔄 answer @",performance.now().toFixed(0),"ms:",pc.signalingState);
+          console.log("🔄 answer @",performance.now().toFixed(0),pc.signalingState);
           await pc.setRemoteDescription({type:"answer",sdp:msg.sdp});
           break;
         case "ice":
-          console.log("💧 got ICE candidate:",msg.candidate);
+          console.log("💧 ICE from server:",msg.candidate);
           await pc.addIceCandidate(msg.candidate);
           break;
         case "chat":
@@ -104,7 +102,6 @@
 
       pc.onicecandidate = e=>{
         if(e.candidate){
-          console.log("💧 local ICE candidate:",e.candidate);
           ws.send(JSON.stringify({type:"ice",candidate:e.candidate.toJSON()}));
         }
       };
@@ -121,7 +118,7 @@
 
       localStream.getTracks().forEach(t=>{
         pc.addTrack(t,localStream);
-        console.log("➕ Added local track:",t.kind);
+        console.log("➕ Added track:",t.kind);
       });
 
       pc.onnegotiationneeded = async ()=>{
@@ -132,7 +129,7 @@
     }
 
     function monitorStats(){
-      setInterval(async ()=>{
+      setInterval(async()=>{
         if(!pc)return;
         let stats=await pc.getStats(),out="",now=performance.now().toFixed(0);
         stats.forEach(r=>{
@@ -153,7 +150,6 @@
     document.getElementById("sendBtn").onclick=()=>{
       let txt=document.getElementById("msgIn").value;
       ws.send(JSON.stringify({type:"chat",from:tokenRole(),text:txt}));
-      document.getElementById("msgIn").value="";
     };
     document.getElementById("admitBtn").onclick=()=>{
       let pid=+document.getElementById("waitingList").value;
