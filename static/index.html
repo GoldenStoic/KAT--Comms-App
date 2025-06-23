@@ -49,7 +49,7 @@
     }
 
     ws.onopen = () => console.log("🔗 WebSocket connected");
-    ws.onclose= () => console.log("🔌 WebSocket closed");
+    ws.onclose = () => console.log("🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
       console.log("📩 raw ws msg:", data);
@@ -65,11 +65,11 @@
 
         case "new_waiting":
           console.log("👥 Received 'new_waiting'", msg.peer_id);
-          const sel = document.getElementById("waitingList");
+          document.getElementById("controls").style.display = "block";
           const opt = document.createElement("option");
           opt.value = msg.peer_id;
           opt.text  = `User ${msg.peer_id}`;
-          sel.appendChild(opt);
+          document.getElementById("waitingList").appendChild(opt);
           break;
 
         case "admitted":
@@ -97,7 +97,7 @@
               await pc.setRemoteDescription(
                 new RTCSessionDescription({ type:"answer", sdp:msg.sdp })
               );
-              console.log("✔️ setRemoteDescription succeeded @", performance.now().toFixed(0), "ms, state now:", pc.signalingState);
+              console.log("✔️ setRemoteDescription succeeded — state now:", pc.signalingState);
             } catch(e) {
               console.error("❌ setRemoteDescription error:", e);
             }
@@ -136,7 +136,7 @@
     };
 
     async function startWebRTC() {
-      console.log("🛫 startWebRTC() @", performance.now().toFixed(0), "ms");
+      console.log("🛫 startWebRTC()");
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         console.log("🎤 getUserMedia succeeded");
@@ -147,36 +147,10 @@
       }
 
       pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-      console.log("🔧 RTCPeerConnection created @", performance.now().toFixed(0), "ms, signalingState:", pc.signalingState);
+      console.log("🔧 RTCPeerConnection created, signalingState:", pc.signalingState);
 
-      // log ICE/connection state changes
-      pc.oniceconnectionstatechange = () => {
-        console.log("🌐 ICE state change:", pc.iceConnectionState);
-      };
-      pc.onconnectionstatechange = () => {
-        console.log("🔗 Connection state change:", pc.connectionState);
-      };
-
-      // log which candidate pair succeeds
-      pc.oniceconnectionstatechange = async () => {
-        const stats = await pc.getStats();
-        stats.forEach(r => {
-          if (r.type === "candidate-pair" && r.state === "succeeded") {
-            console.log("✅ Using candidate-pair:", r.localCandidateType, "→", r.remoteCandidateType);
-          }
-        });
-      };
-
-      pc.ontrack = e => {
-        console.log("🔊 ontrack @", performance.now().toFixed(0), "ms");
-        const audio = document.createElement("audio");
-        audio.srcObject = e.streams[0];
-        audio.autoplay = true;
-        audio.onplaying = () => {
-          console.log("▶️ audio.onplaying @", performance.now().toFixed(0), "ms");
-        };
-        document.body.appendChild(audio);
-      };
+      pc.oniceconnectionstatechange = () => console.log("🌐 ICE state:", pc.iceConnectionState);
+      pc.onconnectionstatechange    = () => console.log("🔗 Connection state:", pc.connectionState);
 
       pc.onicecandidate = e => {
         if (e.candidate) {
@@ -185,45 +159,52 @@
         }
       };
 
+      pc.ontrack = e => {
+        console.log("🔊 ontrack @", performance.now().toFixed(0), "ms");
+        const audio = document.createElement("audio");
+        audio.srcObject = e.streams[0];
+        audio.autoplay = true;
+        audio.onplaying = () => console.log("▶️ audio.onplaying @", performance.now().toFixed(0), "ms");
+        document.body.appendChild(audio);
+      };
+
       localStream.getTracks().forEach(t => {
         pc.addTrack(t, localStream);
         console.log("➕ Added local track:", t.kind);
       });
 
       pc.onnegotiationneeded = async () => {
-        console.log("🔄 negotiationneeded event @", performance.now().toFixed(0), "ms");
+        console.log("✈️ negotiationneeded @", performance.now().toFixed(0), "ms");
         try {
-          const offer = await pc.createOffer();
-          console.log("✈️ Offer created @", performance.now().toFixed(0), "ms");
-          await pc.setLocalDescription(offer);
-          console.log("✈️ Local description set @", performance.now().toFixed(0), "ms, state:", pc.signalingState);
+          await pc.setLocalDescription(await pc.createOffer());
+          console.log("📤 offer sent @", performance.now().toFixed(0), "ms");
           ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
-          console.log("✉️ Offer sent to server @", performance.now().toFixed(0), "ms");
-        } catch(e) {
-          console.error("❌ Error during offer setup:", e);
+        } catch (e) {
+          console.error("❌ Error during negotiationneeded:", e);
         }
       };
     }
 
-    // periodically pull WebRTC stats
     function monitorStats() {
       setInterval(async () => {
         if (!pc) return;
-        const reports = await pc.getStats();
-        let text = "", now = performance.now().toFixed(0);
-        reports.forEach(r => {
+        const stats = await pc.getStats();
+        let out = "", now = performance.now().toFixed(0);
+        stats.forEach(r => {
           if (r.type === "inbound-rtp" && r.kind === "audio") {
-            const rtt = (r.roundTripTime || r.currentRoundTripTime || 0).toFixed(3);
-            const jitter = (r.jitter || 0).toFixed(3);
-            const jBufDelay = (r.jitterBufferDelay || 0).toFixed(3);
-            const emitCnt = r.jitterBufferEmittedCount || 0;
-            text += `⏱ RTT:${rtt}s  jitter:${jitter}s  jBufDelay:${jBufDelay}s  emitCount:${emitCnt}\n`;
+            const rtt       = (r.roundTripTime||r.currentRoundTripTime||0).toFixed(3);
+            const jBufDelay = (r.jitterBufferDelay||0).toFixed(3);
+            const emit      = r.jitterBufferEmittedCount || 0;
+            out += `⏱ RTT:${rtt}s  jitter:${r.jitter.toFixed(3)}s  jBufDelay:${jBufDelay}s  emitCount:${emit}\n`;
+          }
+          if (r.type === "candidate-pair" && r.state === "succeeded") {
+            out += `🔄 cand-pair RTT:${(r.currentRoundTripTime||0).toFixed(3)}s\n`;
           }
         });
-        if (!text) text = "stats not yet available\n";
-        document.getElementById("stats").textContent = `@${now}ms\n${text}`;
-        console.log("🧮 Stats\n" + text);
-      }, 5000);
+        if (!out) out = "stats not yet available";
+        document.getElementById("stats").textContent = `@${now}ms\n` + out;
+        console.log("📊 Stats\n" + out);
+      }, 3000);
     }
 
     // UI handlers…
@@ -244,9 +225,7 @@
     };
     document.getElementById("startQuiz").onclick = () => {
       console.log("❓ Sending start_quiz event");
-      ws.send(JSON.stringify({
-        type:"material_event", event:"start_quiz", payload:{ quizId:42 }
-      }));
+      ws.send(JSON.stringify({ type:"material_event", event:"start_quiz", payload:{ quizId:42 } }));
     };
 
     function tokenRole() {
