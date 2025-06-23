@@ -41,12 +41,17 @@ relay = MediaRelay()
 
 app = FastAPI()
 
-# ─── Utility to normalize a Twilio ice_server dict  ───────────────────────────
+# ─── Utility to normalize a Twilio ice_server dict ────────────────────────────
 def normalize_ice_server(s: dict) -> dict:
-    # Twilio might return 'url' instead of 'urls'
+    # Some entries come back with "url" instead of "urls",
+    # or even both—strip out "url" and ensure we only pass "urls" to RTCIceServer.
     d = dict(s)
-    if "url" in d and "urls" not in d:
-        d["urls"] = [d.pop("url")]
+    if "url" in d:
+        # If they didn't give us "urls", promote single "url" into a list
+        if "urls" not in d:
+            d["urls"] = [d["url"]]
+        # In any case, remove the old key
+        d.pop("url")
     return d
 
 # ─── ICE endpoint for clients to fetch Twilio STUN/TURN ────────────────────────
@@ -79,6 +84,7 @@ async def _admit(ws: WebSocket, room_id: str):
     state["waiting"].discard(ws)
     await ws.send_json({"type": "admitted", "peer_id": id(ws)})
 
+    # Fetch fresh Twilio STUN/TURN servers
     token = twilio_client.tokens.create()
     rtc_ice_servers = []
     for s in token.ice_servers:
@@ -98,9 +104,11 @@ async def _admit(ws: WebSocket, room_id: str):
                 if other is not pc:
                     other.addTrack(relay_track)
 
+    # replay any previously published tracks
     for t in state["audio_tracks"]:
         pc.addTrack(t)
 
+    # signal the client it can now start its offer
     await ws.send_json({"type": "ready_for_offer"})
 
 # ─── WebSocket signaling endpoint ─────────────────────────────────────────────
@@ -147,14 +155,14 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
             elif typ == "ice":
                 pc = state["peers"][ws]
                 c = msg["candidate"]
-                cand_str = c["candidate"].split()
-                foundation = cand_str[0].split(":",1)[1]
-                component  = int(cand_str[1])
-                protocol   = cand_str[2].lower()
-                priority   = int(cand_str[3])
-                ip         = cand_str[4]
-                port       = int(cand_str[5])
-                cand_type  = cand_str[7]
+                parts = c["candidate"].split()
+                foundation = parts[0].split(":",1)[1]
+                component  = int(parts[1])
+                protocol   = parts[2].lower()
+                priority   = int(parts[3])
+                ip         = parts[4]
+                port       = int(parts[5])
+                cand_type  = parts[7]
 
                 ice = RTCIceCandidate(
                     foundation=foundation,
