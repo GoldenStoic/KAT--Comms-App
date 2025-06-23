@@ -36,22 +36,19 @@ twilio_client = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-to-a-strong-secret")
 
 # ─── In-memory room state ─────────────────────────────────────────────────────
-rooms = {}  # room_id → { admins, waiting, peers, audio_tracks }
+rooms = {}  # room_id → { admins, waiting, peers }
 relay = MediaRelay()
 
 app = FastAPI()
 
-# ─── Utility to normalize a Twilio ice_server dict ────────────────────────────
+# ─── Utility to normalize Twilio ice_server dict ──────────────────────────────
 def normalize_ice_server(s: dict) -> dict:
-    # Some entries come back with "url" instead of "urls",
-    # or even both—strip out "url" and ensure we only pass "urls" to RTCIceServer.
     d = dict(s)
     if "url" in d:
-        # If they didn't give us "urls", promote single "url" into a list
         if "urls" not in d:
-            d["urls"] = [d["url"]]
-        # In any case, remove the old key
-        d.pop("url")
+            d["urls"] = [d.pop("url")]
+        else:
+            d.pop("url")
     return d
 
 # ─── ICE endpoint for clients to fetch Twilio STUN/TURN ────────────────────────
@@ -78,13 +75,13 @@ async def authenticate(token: str):
         print("⚠️ authenticate error:", repr(e))
         return "user"
 
-# ─── Admit helper: sets up an aiortc PeerConnection with Twilio ICE ───────────
+# ─── Admit helper: set up PeerConnection without buffering old audio ──────────
 async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
     await ws.send_json({"type": "admitted", "peer_id": id(ws)})
 
-    # Fetch fresh Twilio STUN/TURN servers
+    # fetch fresh Twilio ICE servers
     token = twilio_client.tokens.create()
     rtc_ice_servers = []
     for s in token.ice_servers:
@@ -99,31 +96,27 @@ async def _admit(ws: WebSocket, room_id: str):
     def on_track(track):
         if track.kind == "audio":
             relay_track = relay.subscribe(track)
-            state["audio_tracks"].append(relay_track)
-            for other in state["peers"].values():
-                if other is not pc:
-                    other.addTrack(relay_track)
+            # forward only new audio to existing peers
+            for other_pc in state["peers"].values():
+                if other_pc is not pc:
+                    other_pc.addTrack(relay_track)
 
-    # replay any previously published tracks
-    for t in state["audio_tracks"]:
-        pc.addTrack(t)
-
-    # signal the client it can now start its offer
+    # signal client ready for its offer
     await ws.send_json({"type": "ready_for_offer"})
 
 # ─── WebSocket signaling endpoint ─────────────────────────────────────────────
 @app.websocket("/ws/{room_id}")
 async def ws_endpoint(ws: WebSocket, room_id: str):
     await ws.accept()
-    token = ws.query_params.get("token", "")
-    role  = await authenticate(token)
+    role = await authenticate(ws.query_params.get("token", ""))
     print(f"[ws] conn room={room_id} role={role}")
 
     state = rooms.setdefault(
         room_id,
-        {"admins": set(), "waiting": set(), "peers": {}, "audio_tracks": []}
+        {"admins": set(), "waiting": set(), "peers": {}}
     )
 
+    # admin path
     if role == "admin":
         state["admins"].add(ws)
         print(f"[ws] admitting admin {id(ws)}")
@@ -131,6 +124,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
         for pending in state["waiting"]:
             await ws.send_json({"type":"new_waiting","peer_id":id(pending)})
     else:
+        # user path
         state["waiting"].add(ws)
         await ws.send_json({"type":"waiting"})
         for admin_ws in state["admins"]:
@@ -208,5 +202,9 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
         state["waiting"].discard(ws)
         pc = state["peers"].pop(ws, None)
         if pc:
+            # stop all local senders to free buffers
+            for sender in pc.getSenders():
+                if sender.track:
+                    sender.track.stop()
             await pc.close()
         print(f"[ws] closed {id(ws)}")
