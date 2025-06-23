@@ -35,7 +35,7 @@
     const wsUrl  = `${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`;
     const ws     = new WebSocket(wsUrl);
 
-    // Mirror your Python ICE_SERVERS list
+    // match exactly your Python ICE_SERVERS list (STUN + TURN)
     const ICE_SERVERS = [
       { urls: ["stun:stun.l.google.com:19302"] },
       // { urls: ["turn:your.turn.host:3478?transport=udp"], username:"...", credential:"..." }
@@ -45,21 +45,24 @@
     let hasOffered = false;
 
     ws.onmessage = async ({ data }) => {
+      // log raw incoming messages
+      console.log("📩 raw ws msg:", data);
+
       let msg;
       try { msg = JSON.parse(data); }
-      catch { console.error("Invalid WS message:", data); return; }
+      catch { console.error("Invalid WS JSON:", data); return; }
 
       switch (msg.type) {
+        case "waiting":
+          document.getElementById("waiting").style.display = "block";
+          break;
+
         case "new_waiting":
           const sel = document.getElementById("waitingList");
           const opt = document.createElement("option");
           opt.value = msg.peer_id;
           opt.text  = `User ${msg.peer_id}`;
           sel.appendChild(opt);
-          break;
-
-        case "waiting":
-          document.getElementById("waiting").style.display = "block";
           break;
 
         case "admitted":
@@ -124,44 +127,65 @@
         return;
       }
 
-      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-      pc.onicecandidate = e => {
-        if (e.candidate) {
-          ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
-        }
-      };
+      pc = new RTCPeerConnection({
+        iceServers: ICE_SERVERS,
+        iceTransportPolicy: "relay"   // optional: force TURN-only
+      });
+
       pc.ontrack = e => {
         const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
         audio.autoplay = true;
         document.body.appendChild(audio);
       };
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
+        }
+      };
 
-      // add tracks before creating the offer
+      // add mic track
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-      console.log("🎬 Tracks added, signalingState:", pc.signalingState);
 
-      // create & send offer immediately
-      const offer = await pc.createOffer();
-      console.log("✈️ Offer created");
-      await pc.setLocalDescription(offer);
-      console.log("✈️ Local description set — signalingState:", pc.signalingState);
+      // wait for negotiationneeded
+      pc.onnegotiationneeded = async () => {
+        console.log("🎬 negotiationneeded event");
+        const offer = await pc.createOffer();
+        console.log("✈️ Offer created");
+        await pc.setLocalDescription(offer);
+        console.log("✈️ Local description set — signalingState:", pc.signalingState);
 
-      ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
-      console.log("✉️ Offer sent to server");
+        // wait for ICE gathering to finish
+        await new Promise(resolve => {
+          if (pc.iceGatheringState === "complete") {
+            resolve();
+          } else {
+            function checkState() {
+              if (pc.iceGatheringState === "complete") {
+                pc.removeEventListener("icegatheringstatechange", checkState);
+                resolve();
+              }
+            }
+            pc.addEventListener("icegatheringstatechange", checkState);
+          }
+        });
+
+        console.log("🎉 ICE gathering complete — sending SDP");
+        ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
+        console.log("✉️ Offer sent");
+      };
     }
 
+    // UI event handlers…
     document.getElementById("sendBtn").onclick = () => {
       const text = document.getElementById("msgIn").value;
       ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text }));
       document.getElementById("msgIn").value = "";
     };
-
     document.getElementById("admitBtn").onclick = () => {
       const peerId = Number(document.getElementById("waitingList").value);
       ws.send(JSON.stringify({ type:"admit", peer_id:peerId }));
     };
-
     document.getElementById("nextSlide").onclick = () => {
       ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
     };
