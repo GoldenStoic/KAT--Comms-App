@@ -26,11 +26,13 @@ TW_API_KEY_SECRET = os.environ["TWILIO_API_KEY_SECRET"]
 
 twilio = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
 relay  = MediaRelay()
+app    = FastAPI()
 
-app   = FastAPI()
-rooms = {}  # room_id → { admins:set, waiting:set, peers:dict }
+# room state: admins waiting, peers mapping, and live relay subscriptions
+rooms = {}  # room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def normalize_ice_server(s: dict) -> dict:
@@ -46,6 +48,7 @@ async def authenticate(token: str):
     except:
         return "user"
 
+
 # ─── REST ENDPOINTS ──────────────────────────────────────────────────────────
 @app.get("/ice")
 async def ice():
@@ -57,13 +60,14 @@ async def ice():
 async def index():
     return FileResponse("static/index.html")
 
+
 # ─── SIGNALING ────────────────────────────────────────────────────────────────
 async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
     await ws.send_json({"type":"admitted","peer_id":id(ws)})
 
-    # fresh TURN creds for aiortc
+    # fetch fresh TURN credentials
     token   = twilio.tokens.create()
     servs   = [normalize_ice_server(s) for s in token.ice_servers]
     rtc_ice = [RTCIceServer(**s) for s in servs]
@@ -72,34 +76,49 @@ async def _admit(ws: WebSocket, room_id: str):
     pc = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
+    # **forward any _existing_ live subscriptions** (only future frames)
+    for relay_track in state["audio_tracks"]:
+        pc.addTrack(relay_track)
+
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
             relay_track = relay.subscribe(track)
-            # forward live frames to all other peers
+            # keep it so future joiners also get this
+            state["audio_tracks"].append(relay_track)
+            # forward only to all _other_ peers
             for other in state["peers"].values():
                 if other is not pc:
                     other.addTrack(relay_track)
 
-    # signal client to start
+    # tell the client we’re ready for their offer
     await ws.send_json({"type":"ready_for_offer"})
+
 
 @app.websocket("/ws/{room_id}")
 async def ws_endpoint(ws: WebSocket, room_id: str):
     await ws.accept()
     role  = await authenticate(ws.query_params.get("token",""))
-    state = rooms.setdefault(room_id, {"admins":set(),"waiting":set(),"peers":{}})
+    state = rooms.setdefault(
+        room_id,
+        {"admins":set(), "waiting":set(), "peers":{}, "audio_tracks":[]}
+    )
 
+    # Admin path
     if role == "admin":
         state["admins"].add(ws)
         await _admit(ws, room_id)
+        # let admin know about any waiting users
         for pending in state["waiting"]:
             await ws.send_json({"type":"new_waiting","peer_id":id(pending)})
+
+    # User path
     else:
         state["waiting"].add(ws)
         await ws.send_json({"type":"waiting"})
         for adm in state["admins"]:
             await adm.send_json({"type":"new_waiting","peer_id":id(ws)})
+        # block until an admin admits
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
 
@@ -122,15 +141,15 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 c  = msg["candidate"]
                 parts = c["candidate"].split()
                 ice = RTCIceCandidate(
-                    foundation=parts[0].split(":",1)[1],
-                    component=int(parts[1]),
-                    protocol=parts[2].lower(),
-                    priority=int(parts[3]),
-                    ip=parts[4],
-                    port=int(parts[5]),
-                    type=parts[7],
-                    sdpMid=c.get("sdpMid"),
-                    sdpMLineIndex=c.get("sdpMLineIndex")
+                    foundation = parts[0].split(":",1)[1],
+                    component  = int(parts[1]),
+                    protocol   = parts[2].lower(),
+                    priority   = int(parts[3]),
+                    ip         = parts[4],
+                    port       = int(parts[5]),
+                    type       = parts[7],
+                    sdpMid     = c.get("sdpMid"),
+                    sdpMLineIndex = c.get("sdpMLineIndex")
                 )
                 try:
                     await pc.addIceCandidate(ice)
