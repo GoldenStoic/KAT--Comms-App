@@ -42,7 +42,7 @@
     ];
 
     let pc, localStream;
-    let hasOffered = false;  // ← guard so we only ever send ONE offer
+    let hasOffered = false;
 
     ws.onmessage = async ({ data }) => {
       let msg;
@@ -63,14 +63,12 @@
           break;
 
         case "admitted":
-          // just flip the UI—no WebRTC yet
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
           break;
 
         case "ready_for_offer":
-          // only once!
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = (tokenRole()==="admin") ? "block" : "none";
@@ -81,9 +79,14 @@
           break;
 
         case "answer":
-          await pc.setRemoteDescription(
-            new RTCSessionDescription({ type:"answer", sdp:msg.sdp })
-          );
+          console.log("🔄 signalingState before answer:", pc.signalingState);
+          if (pc && pc.signalingState === "have-local-offer") {
+            await pc.setRemoteDescription(
+              new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
+            );
+          } else {
+            console.warn("❌ Skipping setRemoteDescription in wrong state:", pc ? pc.signalingState : "no-pc");
+          }
           break;
 
         case "ice":
