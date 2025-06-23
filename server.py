@@ -1,12 +1,10 @@
-# server.py
-import os
-import asyncio
-import jwt
+import os, asyncio, jwt
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from twilio.rest import Client
 from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
@@ -16,25 +14,24 @@ from aiortc import (
 )
 from aiortc.contrib.media import MediaRelay
 
-from twilio.rest import Client
-
-# ─── Configuration ────────────────────────────────────────────────────────────
+# ─── Configuration ───────────────────────────────────────────────────────────
 JWT_SECRET        = os.getenv("JWT_SECRET", "change-this-to-a-strong-secret")
 TW_ACCOUNT_SID    = os.environ["TWILIO_ACCOUNT_SID"]
 TW_API_KEY_SID    = os.environ["TWILIO_API_KEY_SID"]
 TW_API_KEY_SECRET = os.environ["TWILIO_API_KEY_SECRET"]
 
 twilio = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
-relay  = MediaRelay()
-app    = FastAPI()
+# limit relay to a single-frame queue → drops everything older
+relay  = MediaRelay(max_queue_size=1)
 
-# room state: admins waiting, peers mapping, and live relay subscriptions
-rooms = {}  # room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
-
+app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
+rooms = {}
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
 def normalize_ice_server(s: dict) -> dict:
     d = dict(s)
     if "url" in d:
@@ -49,7 +46,7 @@ async def authenticate(token: str):
         return "user"
 
 
-# ─── REST ENDPOINTS ──────────────────────────────────────────────────────────
+# ─── REST Endpoints ─────────────────────────────────────────────────────────
 @app.get("/ice")
 async def ice():
     token   = twilio.tokens.create()
@@ -61,13 +58,13 @@ async def index():
     return FileResponse("static/index.html")
 
 
-# ─── SIGNALING ────────────────────────────────────────────────────────────────
+# ─── Signaling ──────────────────────────────────────────────────────────────
 async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
     await ws.send_json({"type":"admitted","peer_id":id(ws)})
 
-    # fetch fresh TURN credentials
+    # fetch fresh STUN/TURN
     token   = twilio.tokens.create()
     servs   = [normalize_ice_server(s) for s in token.ice_servers]
     rtc_ice = [RTCIceServer(**s) for s in servs]
@@ -76,22 +73,20 @@ async def _admit(ws: WebSocket, room_id: str):
     pc = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
-    # **forward any _existing_ live subscriptions** (only future frames)
-    for relay_track in state["audio_tracks"]:
-        pc.addTrack(relay_track)
+    # immediately forward any _existing_ relay subscriptions
+    for rt in state["audio_tracks"]:
+        pc.addTrack(rt)
 
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
-            relay_track = relay.subscribe(track)
-            # keep it so future joiners also get this
-            state["audio_tracks"].append(relay_track)
-            # forward only to all _other_ peers
-            for other in state["peers"].values():
-                if other is not pc:
-                    other.addTrack(relay_track)
+            # subscribe _once_ (1-frame queue)
+            r = relay.subscribe(track)
+            state["audio_tracks"].append(r)
+            for other_pc in state["peers"].values():
+                if other_pc is not pc:
+                    other_pc.addTrack(r)
 
-    # tell the client we’re ready for their offer
     await ws.send_json({"type":"ready_for_offer"})
 
 
@@ -104,21 +99,16 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
         {"admins":set(), "waiting":set(), "peers":{}, "audio_tracks":[]}
     )
 
-    # Admin path
     if role == "admin":
         state["admins"].add(ws)
         await _admit(ws, room_id)
-        # let admin know about any waiting users
         for pending in state["waiting"]:
             await ws.send_json({"type":"new_waiting","peer_id":id(pending)})
-
-    # User path
     else:
         state["waiting"].add(ws)
         await ws.send_json({"type":"waiting"})
         for adm in state["admins"]:
             await adm.send_json({"type":"new_waiting","peer_id":id(ws)})
-        # block until an admin admits
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
 
@@ -141,14 +131,14 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 c  = msg["candidate"]
                 parts = c["candidate"].split()
                 ice = RTCIceCandidate(
-                    foundation = parts[0].split(":",1)[1],
-                    component  = int(parts[1]),
-                    protocol   = parts[2].lower(),
-                    priority   = int(parts[3]),
-                    ip         = parts[4],
-                    port       = int(parts[5]),
-                    type       = parts[7],
-                    sdpMid     = c.get("sdpMid"),
+                    foundation=parts[0].split(":",1)[1],
+                    component = int(parts[1]),
+                    protocol  = parts[2].lower(),
+                    priority  = int(parts[3]),
+                    ip        = parts[4],
+                    port      = int(parts[5]),
+                    type      = parts[7],
+                    sdpMid        = c.get("sdpMid"),
                     sdpMLineIndex = c.get("sdpMLineIndex")
                 )
                 try:
