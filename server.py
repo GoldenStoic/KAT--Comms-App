@@ -93,7 +93,8 @@ async def _admit(ws: WebSocket, room_id: str):
             if not delivered:
                 print("📡 No active consumers — starting MediaBlackhole to avoid buffer buildup")
                 blackhole = MediaBlackhole()
-                asyncio.ensure_future(blackhole.start(track))
+                blackhole.addTrack(track)
+                asyncio.ensure_future(blackhole.start())
 
     await ws.send_json({"type":"ready_for_offer"})
 
