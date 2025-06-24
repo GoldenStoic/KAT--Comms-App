@@ -70,18 +70,24 @@ async def _admit(ws: WebSocket, room_id: str):
     pc      = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
+    # Fresh relay subscription for each existing audio track
     for t in state["audio_tracks"]:
-        pc.addTrack(t)
+        relay_track = relay.subscribe(t)
+        global_audio_relays.append(relay_track)
+        pc.addTrack(relay_track)
 
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
-            relay_track = relay.subscribe(track)
-            global_audio_relays.append(relay_track)  # prevent GC
-            state["audio_tracks"].append(relay_track)
-            for other in state["peers"].values():
-                if other is not pc:
-                    other.addTrack(relay_track)
+            # Store original track for future peer joins
+            state["audio_tracks"].append(track)
+
+            # Immediately relay to all other peers
+            for other_ws, other_pc in state["peers"].items():
+                if other_pc is not pc:
+                    relay_track = relay.subscribe(track)
+                    global_audio_relays.append(relay_track)
+                    other_pc.addTrack(relay_track)
 
     await ws.send_json({"type":"ready_for_offer"})
 
