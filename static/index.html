@@ -33,13 +33,10 @@
   <div id="stats">No stats yet</div>
 
   <script>
-    // prompt for a JWT that encodes { role: "admin" } or { role: "user" }
     const token   = prompt("Enter token (admin or user JWT)");
     const roomId  = "room1";
-
-    // choose wss:// if page is HTTPS, else ws://
-    const proto  = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws     = new WebSocket(
+    const proto   = window.location.protocol === "https:" ? "wss" : "ws";
+    const ws      = new WebSocket(
       `${proto}://${window.location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`
     );
 
@@ -50,9 +47,7 @@
     async function loadIceServers() {
       console.log("🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
-      const data = await res.json();
-      // ← only this line has changed: we now use the response as-is, since it's already an Array
-      ICE_SERVERS = data;
+      ICE_SERVERS = await res.json();  // ← treat response as array directly
       console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
@@ -60,14 +55,11 @@
     ws.onclose = () => console.log("🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
-      let msg;
-      try { msg = JSON.parse(data); }
-      catch { console.error("❌ Invalid WS JSON:", data); return; }
-
+      const msg = JSON.parse(data);
       console.log("📩 raw ws msg:", data);
+
       switch (msg.type) {
         case "waiting":
-          console.log("⏳ Received 'waiting'");
           document.getElementById("waiting").style.display = "block";
           break;
 
@@ -97,7 +89,7 @@
           break;
 
         case "answer":
-          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms, signalingState before:", pc.signalingState);
+          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms");
           await pc.setRemoteDescription({ type:"answer", sdp: msg.sdp });
           break;
 
@@ -168,15 +160,14 @@
       }, 5000);
     }
 
+    document.getElementById("admitBtn").onclick = () => {
+      const peer = +document.getElementById("waitingList").value;
+      ws.send(JSON.stringify({ type:"admit", peer_id: peer }));
+    };
     document.getElementById("sendBtn").onclick = () => {
       const txt = document.getElementById("msgIn").value;
       ws.send(JSON.stringify({ type:"chat", from: tokenRole(), text: txt }));
       document.getElementById("msgIn").value = "";
-    };
-    document.getElementById("admitBtn").onclick = () => {
-      const peer = +document.getElementById("waitingList").value;
-      console.log("🔨 admitBtn clicked, peer_id=", peer);
-      ws.send(JSON.stringify({ type:"admit", peer_id: peer }));
     };
     document.getElementById("nextSlide").onclick = () => {
       ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
