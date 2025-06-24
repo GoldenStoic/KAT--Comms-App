@@ -1,119 +1,228 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>Audio Room</title>
+  <meta charset="utf-8" />
+  <title>Voice+Chat Room (Debug Mode)</title>
+  <style>
+    body { font-family: sans-serif; }
+    #waiting, #chat, #controls, #material { margin: 1em; }
+    #stats { font-family: monospace; white-space: pre; background: #f0f0f0; padding: 1em; }
+  </style>
 </head>
 <body>
-  <h1>Audio Room</h1>
-  <p>
-    <button id="start">Join Room</button>
-    <button id="admit" disabled>Admit Waiting User</button>
-  </p>
-  <div>
-    <input id="chatInput" placeholder="Type a message…">
-    <button id="sendChat">Send</button>
+  <h1>Training Room (Debug Mode)</h1>
+
+  <div id="waiting">Waiting for admin to admit…</div>
+
+  <div id="controls" style="display:none;">
+    <button id="admitBtn">(Admin) Admit Selected</button>
+    <select id="waitingList"></select>
+    <br/><br/>
+    <button id="nextSlide">Next Slide</button>
+    <button id="startQuiz">Start Quiz</button>
   </div>
-  <ul id="messages"></ul>
 
-<script>
-  const log = console.log;
-  let ws, pc, myRole, myId, pendingId;
+  <div id="material"></div>
 
-  document.getElementById('start').onclick = joinRoom;
-  document.getElementById('admit').onclick = () => {
-    ws.send(JSON.stringify({type:'admit', peer_id: pendingId}));
-    document.getElementById('admit').disabled = true;
-  };
-  document.getElementById('sendChat').onclick = () => {
-    const txt = document.getElementById('chatInput').value;
-    ws.send(JSON.stringify({type:'chat', from:myRole, text:txt}));
-    document.getElementById('chatInput').value = '';
-  };
+  <div id="chat" style="display:none;">
+    <div id="chatLog" style="height:200px; overflow:auto; border:1px solid #ccc;"></div>
+    <input id="msgIn" placeholder="Message…"/><button id="sendBtn">Send</button>
+  </div>
 
-  async function joinRoom() {
-    // choose role by URL:  add ?admin to become admin
-    myRole = location.search.includes('admin') ? 'admin' : 'user';
-    const token = ''; // put your JWT here if you’re using auth
-    ws = new WebSocket(`ws://${location.host}/ws/room1?token=${token}`);
+  <h2>Connection Stats</h2>
+  <div id="stats">No stats yet</div>
 
-    ws.onopen = () => log('🔗 WebSocket open');
-    ws.onmessage = async e => {
-      const msg = JSON.parse(e.data);
-      log('📩', msg);
-      switch(msg.type) {
-        case 'waiting':
-          log('⏳ Waiting for admin to admit');
-          document.getElementById('start').disabled = true;
+  <script>
+    // --- initialize
+    const token   = prompt("Enter token (admin or user JWT)");
+    const roomId  = "room1";  // or dynamically
+    const proto   = location.protocol === "https:" ? "wss" : "ws";
+    const ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+
+    let ICE_SERVERS = [];
+    let pc, localStream;
+    let hasOffered = false;
+
+    // --- fetch TURN creds from server
+    async function loadIceServers() {
+      console.log("🔍 Fetching ICE servers from /ice");
+      const res = await fetch("/ice");
+      ICE_SERVERS = await res.json();
+      console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
+    }
+
+    // --- WebSocket events
+    ws.onopen = () => console.log("🔗 WebSocket connected");
+    ws.onclose = () => console.log("🔌 WebSocket closed");
+
+    ws.onmessage = async ({ data }) => {
+      console.log("📩 raw ws msg:", data);
+      let msg;
+      try { msg = JSON.parse(data); }
+      catch { console.error("❌ Invalid WS JSON:", data); return; }
+
+      switch (msg.type) {
+        case "waiting":
+          console.log("⏳ got 'waiting'");
+          document.getElementById("waiting").style.display = "block";
           break;
 
-        case 'new_waiting':
-          pendingId = msg.peer_id;
-          document.getElementById('admit').disabled = (myRole!=='admin');
+        case "new_waiting":
+          console.log("👥 got 'new_waiting'", msg.peer_id);
+          document.getElementById("controls").style.display = "block";
+          const opt = document.createElement("option");
+          opt.value = msg.peer_id;
+          opt.text  = `User ${msg.peer_id}`;
+          document.getElementById("waitingList").appendChild(opt);
           break;
 
-        case 'admitted':
-          myId = msg.peer_id;
-          log('✅ Admitted, peer_id =', myId);
-          document.getElementById('start').disabled = true;
+        case "admitted":
+          console.log("✅ got 'admitted'", msg.peer_id);
+          document.getElementById("waiting").style.display  = "none";
+          document.getElementById("chat").style.display     = "block";
+          document.getElementById("controls").style.display = tokenRole()==="admin" ? "block" : "none";
           break;
 
-        case 'ready_for_offer':
-          await setupWebRTC();
+        case "ready_for_offer":
+          console.log("📨 got 'ready_for_offer'");
+          if (!hasOffered) {
+            hasOffered = true;
+            await loadIceServers();
+            await startWebRTC();
+            monitorStats();
+          }
           break;
 
-        case 'ice':
+        case "answer":
+          console.log("🔄 setting answer, state=", pc.signalingState);
+          await pc.setRemoteDescription({ type:"answer", sdp: msg.sdp });
+          break;
+
+        case "ice":
+          console.log("💧 adding ICE candidate from server");
           await pc.addIceCandidate(msg.candidate);
           break;
 
-        case 'answer':
-          await pc.setRemoteDescription({type:'answer', sdp:msg.sdp});
-          log('✔️ Remote description set');
+        case "chat":
+          console.log("💬 chat", msg.from, msg.text);
+          const log = document.getElementById("chatLog");
+          log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
+          log.scrollTop = log.scrollHeight;
           break;
 
-        case 'chat':
-          const li = document.createElement('li');
-          li.textContent = msg.from + ': ' + msg.text;
-          document.getElementById('messages').append(li);
+        case "material_event":
+          console.log("📚 material_event", msg.event, msg.payload);
+          handleMaterial(msg.event, msg.payload);
           break;
-      }
-    };
-  }
 
-  async function setupWebRTC() {
-    // fetch TURN/STUN
-    const iceServers = await (await fetch('/ice')).json();
-
-    // only TURN candidates (relay) pass to the server
-    pc = new RTCPeerConnection({
-      iceTransportPolicy: 'relay',
-      iceServers,
-    });
-
-    pc.onicecandidate = ({candidate}) => {
-      if (candidate) {
-        ws.send(JSON.stringify({type:'ice', candidate}));
+        default:
+          console.warn("❓ unknown msg.type", msg.type);
       }
     };
 
-    pc.ontrack = ({track}) => {
-      if (track.kind === 'audio') {
-        const audio = new Audio();
-        audio.srcObject = new MediaStream([track]);
-        audio.play();
+    // --- start WebRTC when server says so
+    async function startWebRTC() {
+      console.log("🛫 startWebRTC()");
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("🎤 getUserMedia succeeded");
+      } catch (err) {
+        console.error("❌ getUserMedia failed", err);
+        alert("Microphone access is required: " + err.message);
+        return;
       }
+
+      pc = new RTCPeerConnection({
+        iceServers: ICE_SERVERS,
+        iceTransportPolicy: "relay"   // force TURN
+      });
+      console.log("🔧 RTCPeerConnection created, signalingState:", pc.signalingState);
+
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          console.log("💧 local ICE candidate");
+          ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log("🌐 ICE state:", pc.iceConnectionState);
+      };
+      pc.onconnectionstatechange = () => {
+        console.log("🔗 Connection state:", pc.connectionState);
+      };
+
+      pc.ontrack = e => {
+        console.log("🔊 Remote track received");
+        const audio = document.createElement("audio");
+        audio.srcObject = e.streams[0];
+        audio.autoplay = true;
+        audio.onplaying = () => console.log("▶️ audio.onplaying");
+        document.body.appendChild(audio);
+      };
+
+      // add mic track
+      localStream.getTracks().forEach(t => {
+        pc.addTrack(t, localStream);
+        console.log("➕ Added local track:", t.kind);
+      });
+
+      // negotiate
+      pc.onnegotiationneeded = async () => {
+        console.log("✈️ negotiationneeded");
+        await pc.setLocalDescription(await pc.createOffer());
+        console.log("📤 offer sent");
+        ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
+      };
+    }
+
+    // --- periodically pull stats
+    function monitorStats() {
+      setInterval(async () => {
+        if (!pc) return;
+        const stats = await pc.getStats();
+        let out = "";
+        stats.forEach(r => {
+          if (r.type==="inbound-rtp" && r.kind==="audio") {
+            const rtt = (r.roundTripTime||r.currentRoundTripTime||0).toFixed(3);
+            const jit = r.jitter.toFixed(3);
+            out += `RTT:${rtt}s  jitter:${jit}s\n`;
+          }
+        });
+        document.getElementById("stats").textContent = out || "stats not yet available";
+        console.log("📊 stats\n" + out);
+      }, 3000);
+    }
+
+    // --- UI event handlers
+    document.getElementById("sendBtn").onclick = () => {
+      const txt = document.getElementById("msgIn").value;
+      ws.send(JSON.stringify({ type:"chat", from: tokenRole(), text: txt }));
+      document.getElementById("msgIn").value = "";
+    };
+    document.getElementById("admitBtn").onclick = () => {
+      const peer = +document.getElementById("waitingList").value;
+      ws.send(JSON.stringify({ type:"admit", peer_id: peer }));
+    };
+    document.getElementById("nextSlide").onclick = () => {
+      ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
+    };
+    document.getElementById("startQuiz").onclick = () => {
+      ws.send(JSON.stringify({
+        type:"material_event", event:"start_quiz", payload:{ quizId:42 }
+      }));
     };
 
-    pc.onnegotiationneeded = async () => {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({type:'offer', sdp: pc.localDescription.sdp}));
-    };
-
-    // grab mic & send to server
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-    stream.getTracks().forEach(t => pc.addTrack(t, stream));
-  }
-</script>
+    // --- helpers
+    function tokenRole() {
+      try { return JSON.parse(atob(token.split(".")[1])).role; }
+      catch { return "user"; }
+    }
+    function handleMaterial(event, payload) {
+      const mat = document.getElementById("material");
+      if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
+      if (event === "start_quiz") mat.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
+    }
+  </script>
 </body>
 </html>
