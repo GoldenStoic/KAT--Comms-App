@@ -56,7 +56,9 @@
     ws.onclose = () => console.log("🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
-      let msg = JSON.parse(data);
+      let msg;
+      try { msg = JSON.parse(data); }
+      catch { console.error("❌ Invalid WS JSON:", data); return; }
       console.log("📩 raw ws msg:", data);
 
       switch (msg.type) {
@@ -91,7 +93,7 @@
           break;
 
         case "answer":
-          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms, signalingState before:", pc.signalingState);
+          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms");
           await pc.setRemoteDescription({ type:"answer", sdp: msg.sdp });
           break;
 
@@ -127,16 +129,17 @@
       pc.oniceconnectionstatechange = () => console.log("🌐 ICE state:", pc.iceConnectionState);
       pc.onconnectionstatechange   = () => console.log("🔗 Connection state:", pc.connectionState);
 
-      // ←——— HERE’S THE ONLY CHANGE ———→
+      // ←——— RESTORED AUDIO HANDLER ———→
       pc.ontrack = e => {
         console.log("🔊 ontrack @", performance.now().toFixed(0));
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        audioCtx.resume().then(() => {
-          const src = audioCtx.createMediaStreamSource(e.streams[0]);
-          src.connect(audioCtx.destination);
-        });
+        const audio = document.createElement("audio");
+        audio.srcObject = e.streams[0];
+        audio.autoplay = true;
+        audio.playsInline = true;
+        document.body.appendChild(audio);
+        audio.play().catch(err => console.warn("audio.play() failed:", err));
       };
-      // ←——————————————— end change ————————————————→
+      // ←—————————————— end change ————————————————→
 
       for (const t of localStream.getTracks()) {
         pc.addTrack(t, localStream);
