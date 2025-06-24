@@ -50,7 +50,8 @@
     async function loadIceServers() {
       console.log("🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
-      ICE_SERVERS = await res.json();
+      const data = await res.json();            // ← parse full payload
+      ICE_SERVERS = data.iceServers;            // ← grab just the array
       console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
