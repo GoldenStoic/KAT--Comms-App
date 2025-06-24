@@ -43,12 +43,19 @@
     let pc, localStream;
     let hasOffered = false;
 
-    // --- fetch TURN creds from server
+    // --- fetch TURN creds from server (filter out any STUN entries)
     async function loadIceServers() {
       console.log("🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
-      ICE_SERVERS = await res.json();
-      console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
+      const list = await res.json();
+      ICE_SERVERS = list
+        .map(s => ({
+          urls: s.urls.filter(u => u.startsWith("turn:")),
+          username: s.username,
+          credential: s.credential
+        }))
+        .filter(s => s.urls.length);
+      console.log("✅ TURN-only ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
     // --- WebSocket events
