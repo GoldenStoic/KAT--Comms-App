@@ -33,32 +33,44 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 
 async def safe_send(ws: WebSocket, message: dict):
+    """
+    Wrap ws.send_json so that if the socket is already closed we swallow the error.
+    """
     try:
         await ws.send_json(message)
     except (WebSocketDisconnect, RuntimeError):
-        # socket already closed—ignore
-        pass
+        pass  # socket already closed
+
 
 def normalize_ice_server(spec) -> dict:
+    """
+    Filter a Twilio ICE‐server dict down to the keys RTCIceServer expects.
+    """
     if hasattr(spec, "to_dict"):
         d = spec.to_dict()
     elif hasattr(spec, "_properties"):
         d = dict(spec._properties)
     else:
         d = dict(spec)
-    # Twilio sometimes returns "url" instead of "urls"
+
+    # Twilio sometimes uses "url" instead of "urls"
     if "url" in d and "urls" not in d:
         d["urls"] = [d.pop("url")]
-    allowed = {}
+
+    out = {}
     if "urls" in d:
-        allowed["urls"] = d["urls"]
+        out["urls"] = d["urls"]
     if "username" in d:
-        allowed["username"] = d["username"]
+        out["username"] = d["username"]
     if "credential" in d:
-        allowed["credential"] = d["credential"]
-    return allowed
+        out["credential"] = d["credential"]
+    return out
+
 
 def parse_ice_candidate(line: str) -> RTCIceCandidate:
+    """
+    Convert a single ICE candidate line into an RTCIceCandidate.
+    """
     parts = line.strip().split()
     component = int(parts[1].split("=")[1])
     foundation = parts[2].split("=")[1]
@@ -74,14 +86,11 @@ def parse_ice_candidate(line: str) -> RTCIceCandidate:
     i = 8
     while i < len(parts):
         if parts[i] == "raddr":
-            relatedAddress = parts[i + 1]
-            i += 2
+            relatedAddress = parts[i + 1]; i += 2
         elif parts[i] == "rport":
-            relatedPort = int(parts[i + 1])
-            i += 2
+            relatedPort = int(parts[i + 1]); i += 2
         elif parts[i] == "tcptype":
-            tcpType = parts[i + 1]
-            i += 2
+            tcpType = parts[i + 1]; i += 2
         else:
             i += 1
 
@@ -100,7 +109,11 @@ def parse_ice_candidate(line: str) -> RTCIceCandidate:
         tcpType=tcpType,
     )
 
+
 async def authenticate(token: str) -> str:
+    """
+    Simple JWT‐based role extractor.
+    """
     try:
         data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return data.get("role", "user")
@@ -137,20 +150,21 @@ async def index():
 
 # ─── Admit helper ────────────────────────────────────────────────────────────────
 async def _admit(ws: WebSocket, room_id: str):
+    """
+    Kick off the WebRTC handshake for a single peer ws.
+    """
     state = rooms[room_id]
     state["waiting"].discard(ws)
 
-    # notify admitted
     await safe_send(ws, {"type": "admitted", "peer_id": id(ws)})
 
-    # fetch fresh STUN/TURN for this peer
+    # fetch fresh STUN/TURN
     token = twilio_client.tokens.create()
     ice_servers = [
         RTCIceServer(**normalize_ice_server(s))
         for s in token.ice_servers
     ]
 
-    # <<< CHANGE HERE: wrap in RTCConfiguration >>>
     config = RTCConfiguration(iceServers=ice_servers)
     pc = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
@@ -168,23 +182,26 @@ async def _admit(ws: WebSocket, room_id: str):
     @pc.on("track")
     def on_track(track):
         relay.subscribe(track)
+        # relay to all other peers
         for peer_ws, peer_pc in list(state["peers"].items()):
             if peer_ws is not ws:
                 peer_pc.addTrack(relay.subscribe(track))
 
     try:
+        # Signal client to send offer
         await safe_send(ws, {"type": "ready_for_offer"})
+
+        # Wait for their offer
         offer = await ws.receive_json()
         desc = RTCSessionDescription(offer["sdp"], offer["type"])
         await pc.setRemoteDescription(desc)
 
+        # Send back our answer
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
-        await safe_send(ws, {
-            "type": "answer",
-            "sdp": pc.localDescription.sdp
-        })
+        await safe_send(ws, {"type": "answer", "sdp": pc.localDescription.sdp})
 
+        # Now shuttle ICE candidates
         while True:
             msg = await ws.receive_json()
             if msg.get("type") == "candidate":
@@ -192,17 +209,19 @@ async def _admit(ws: WebSocket, room_id: str):
                 cand.sdpMid = msg.get("sdpMid")
                 cand.sdpMLineIndex = msg.get("sdpMLineIndex")
                 await pc.addIceCandidate(cand)
+
     except WebSocketDisconnect:
         pass
     finally:
+        # Clean up this peer
+        state["peers"].pop(ws, None)
         state["admins"].discard(ws)
         state["waiting"].discard(ws)
-        old_pc = state["peers"].pop(ws, None)
-        if old_pc:
-            for sender in old_pc.getSenders():
+        if pc:
+            for sender in pc.getSenders():
                 if sender.track:
                     sender.track.stop()
-            await old_pc.close()
+            await pc.close()
 
 
 # ─── WebSocket entry point ──────────────────────────────────────────────────────
@@ -217,33 +236,64 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
     })
 
     if role == "admin":
+        # New admin joins
         state["admins"].add(ws)
+
+        # Notify admin about anyone already waiting
         for pending in state["waiting"]:
             await safe_send(ws, {
                 "type": "new_waiting",
                 "peer_id": id(pending),
             })
+
+        # Admin command loop
+        try:
+            while True:
+                msg = await ws.receive_json()
+                t = msg.get("type")
+
+                if t == "admit":
+                    # Admin clicked “Admit”
+                    peer_id = msg.get("peer_id")
+                    pending = next(
+                        (p for p in state["waiting"] if id(p) == peer_id),
+                        None
+                    )
+                    if pending:
+                        # launch _admit() in background for that peer
+                        asyncio.create_task(_admit(pending, room_id))
+
+                # elif t == "material_event":
+                #     # broadcast material events to all admitted peers
+                #     for peer_ws in list(state["peers"]):
+                #         asyncio.create_task(safe_send(peer_ws, {
+                #             "type": "material_event",
+                #             "event": msg["event"],
+                #             "payload": msg.get("payload")
+                #         }))
+
+                # elif t == "chat":
+                #     # optionally handle admin-sent chat
+                #     for peer_ws in list(state["peers"]):
+                #         asyncio.create_task(safe_send(peer_ws, msg))
+
+        except WebSocketDisconnect:
+            pass
+        finally:
+            state["admins"].discard(ws)
+
     else:
+        # A user-peer joins
         state["waiting"].add(ws)
         await safe_send(ws, {"type": "waiting"})
+
+        # Tell all admins someone is waiting
         for admin_ws in state["admins"]:
             await safe_send(admin_ws, {
                 "type": "new_waiting",
                 "peer_id": id(ws),
             })
-        while ws not in state["peers"]:
-            await asyncio.sleep(0.1)
 
-    try:
+        # Hand off this WebSocket to the admit helper once an admin admits them
+        # (_admit will keep the socket open for the entire handshake + ICE)
         await _admit(ws, room_id)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        state["admins"].discard(ws)
-        state["waiting"].discard(ws)
-        old_pc = state["peers"].pop(ws, None)
-        if old_pc:
-            for sender in old_pc.getSenders():
-                if sender.track:
-                    sender.track.stop()
-            await old_pc.close()
