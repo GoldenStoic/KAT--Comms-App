@@ -1,4 +1,5 @@
 # server.py
+
 import os, sys, asyncio, jwt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -122,14 +123,16 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 # 2) create answer
                 answer = await pc.createAnswer()
 
-                # 3) patch SDP: ensure each audio m-line has 'a=sendrecv'
+                # 3) patch SDP: ensure each audio m-line has 'a=sendrecv',
+                #    and force 20 ms packetization to cut down buffering
                 lines = answer.sdp.splitlines()
                 new_lines = []
                 for line in lines:
                     new_lines.append(line)
                     if line.startswith("m=audio"):
-                        # insert sendrecv immediately after the m=audio line
                         new_lines.append("a=sendrecv")
+                        new_lines.append("a=ptime:20")
+                        new_lines.append("a=maxptime:20")
                 patched_sdp = "\r\n".join(new_lines) + "\r\n"
 
                 # 4) setLocalDescription with patched SDP
