@@ -48,22 +48,26 @@
     let hasOffered = false;
 
     async function loadIceServers() {
-      console.log("🔍 Fetching ICE servers from /ice");
+      console.log("[CLIENT] 🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
-      const data = await res.json();            // ← parse full payload
-      ICE_SERVERS = data.iceServers;            // ← grab just the array
-      console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
+      const data = await res.json();
+      ICE_SERVERS = data.iceServers;
+      console.log("[CLIENT] ✅ ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
-    ws.onopen = () => console.log("🔗 WebSocket connected");
-    ws.onclose = () => console.log("🔌 WebSocket closed");
+    ws.onopen = () => console.log("[CLIENT] 🔗 WebSocket connected");
+    ws.onclose = () => console.log("[CLIENT] 🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
       let msg;
-      try { msg = JSON.parse(data); }
-      catch { console.error("❌ Invalid WS JSON:", data); return; }
+      try {
+        msg = JSON.parse(data);
+      } catch {
+        console.error("[CLIENT] ❌ Invalid WS JSON:", data);
+        return;
+      }
+      console.log(`[CLIENT] ← ws message type=${msg.type}`, msg);
 
-      console.log("📩 ws msg:", msg);
       switch (msg.type) {
         case "waiting":
           document.getElementById("waiting").style.display = "block";
@@ -78,6 +82,7 @@
           break;
 
         case "admitted":
+          console.log("[CLIENT] → got admitted");
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = tokenRole()==="admin" ? "block" : "none";
@@ -93,10 +98,12 @@
           break;
 
         case "answer":
+          console.log("[CLIENT] → setting remote answer");
           await pc.setRemoteDescription({ type:"answer", sdp: msg.sdp });
           break;
 
         case "ice":
+          console.log("[CLIENT] → adding remote ICE candidate");
           await pc.addIceCandidate(msg.candidate);
           break;
 
@@ -120,33 +127,35 @@
         return;
       }
 
+      console.log("[CLIENT] → creating RTCPeerConnection");
       pc = new RTCPeerConnection({
         iceServers: ICE_SERVERS,
-        iceTransportPolicy: "relay" // TURN-only
+        iceTransportPolicy: "relay"
       });
 
       pc.onicecandidate = e => {
         if (e.candidate) {
+          console.log("[CLIENT] → sending local ICE candidate");
           ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
         }
       };
-      pc.oniceconnectionstatechange = () => console.log("🌐 ICE state:", pc.iceConnectionState);
-      pc.onconnectionstatechange   = () => console.log("🔗 Connection state:", pc.connectionState);
+      pc.oniceconnectionstatechange = () => console.log("[CLIENT] 🌐 ICE state:", pc.iceConnectionState);
+      pc.onconnectionstatechange   = () => console.log("[CLIENT] 🔗 Connection state:", pc.connectionState);
 
       pc.ontrack = e => {
-        console.log("🔊 Remote track");
+        console.log("[CLIENT] 🔊 Received remote track");
         const audio = new Audio();
         audio.srcObject = e.streams[0];
         audio.autoplay = true;
         document.body.appendChild(audio);
       };
 
-      // add mic
       for (const t of localStream.getTracks()) {
         pc.addTrack(t, localStream);
       }
 
       pc.onnegotiationneeded = async () => {
+        console.log("[CLIENT] → negotiationneeded, creating offer");
         await pc.setLocalDescription(await pc.createOffer());
         ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
       };
@@ -175,6 +184,7 @@
     };
     document.getElementById("admitBtn").onclick = () => {
       const peer = +document.getElementById("waitingList").value;
+      console.log("[CLIENT] → admin sending admit for peer_id=", peer);
       ws.send(JSON.stringify({ type:"admit", peer_id: peer }));
     };
     document.getElementById("nextSlide").onclick = () => {

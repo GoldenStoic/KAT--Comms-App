@@ -1,5 +1,3 @@
-# server.py
-
 import os
 import asyncio
 import jwt
@@ -156,16 +154,20 @@ async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
 
+    print(f"[SERVER] → starting _admit() for peer id={id(ws)}")
+
+    # 1) notify admitted
     await safe_send(ws, {"type": "admitted", "peer_id": id(ws)})
 
-    # fetch fresh STUN/TURN
+    # 2) fetch fresh STUN/TURN
     token = twilio_client.tokens.create()
     ice_servers = [
         RTCIceServer(**normalize_ice_server(s))
         for s in token.ice_servers
     ]
-
     config = RTCConfiguration(iceServers=ice_servers)
+
+    # 3) build PeerConnection
     pc = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
@@ -182,26 +184,26 @@ async def _admit(ws: WebSocket, room_id: str):
     @pc.on("track")
     def on_track(track):
         relay.subscribe(track)
-        # relay to all other peers
         for peer_ws, peer_pc in list(state["peers"].items()):
             if peer_ws is not ws:
                 peer_pc.addTrack(relay.subscribe(track))
 
     try:
-        # Signal client to send offer
+        # 4) ready for offer
         await safe_send(ws, {"type": "ready_for_offer"})
 
-        # Wait for their offer
+        # 5) wait for offer
         offer = await ws.receive_json()
+        print(f"[SERVER] ← offer from peer id={id(ws)}")
         desc = RTCSessionDescription(offer["sdp"], offer["type"])
         await pc.setRemoteDescription(desc)
 
-        # Send back our answer
+        # 6) create & send answer
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await safe_send(ws, {"type": "answer", "sdp": pc.localDescription.sdp})
 
-        # Now shuttle ICE candidates
+        # 7) shuttle ICE candidates
         while True:
             msg = await ws.receive_json()
             if msg.get("type") == "candidate":
@@ -211,9 +213,9 @@ async def _admit(ws: WebSocket, room_id: str):
                 await pc.addIceCandidate(cand)
 
     except WebSocketDisconnect:
-        pass
+        print(f"[SERVER] peer id={id(ws)} disconnected during _admit()")
     finally:
-        # Clean up this peer
+        # cleanup
         state["peers"].pop(ws, None)
         state["admins"].discard(ws)
         state["waiting"].discard(ws)
@@ -222,6 +224,7 @@ async def _admit(ws: WebSocket, room_id: str):
                 if sender.track:
                     sender.track.stop()
             await pc.close()
+        print(f"[SERVER] → cleaned up peer id={id(ws)}")
 
 
 # ─── WebSocket entry point ──────────────────────────────────────────────────────
@@ -236,64 +239,52 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
     })
 
     if role == "admin":
-        # New admin joins
+        print(f"[SERVER] Admin connected: {ws.client}  waiting={len(state['waiting'])}")
         state["admins"].add(ws)
 
-        # Notify admin about anyone already waiting
+        # notify admin about any already-waiting peers
         for pending in state["waiting"]:
+            print(f"[SERVER] → notifying admin of pending peer id={id(pending)}")
             await safe_send(ws, {
                 "type": "new_waiting",
                 "peer_id": id(pending),
             })
 
-        # Admin command loop
+        # admin command loop
         try:
             while True:
                 msg = await ws.receive_json()
+                print(f"[SERVER] ← admin msg: {msg}")
                 t = msg.get("type")
 
                 if t == "admit":
-                    # Admin clicked “Admit”
                     peer_id = msg.get("peer_id")
+                    print(f"[SERVER] → admin admitting peer_id={peer_id}")
                     pending = next(
                         (p for p in state["waiting"] if id(p) == peer_id),
                         None
                     )
                     if pending:
-                        # launch _admit() in background for that peer
+                        # kick off handshake in background
                         asyncio.create_task(_admit(pending, room_id))
 
-                # elif t == "material_event":
-                #     # broadcast material events to all admitted peers
-                #     for peer_ws in list(state["peers"]):
-                #         asyncio.create_task(safe_send(peer_ws, {
-                #             "type": "material_event",
-                #             "event": msg["event"],
-                #             "payload": msg.get("payload")
-                #         }))
-
-                # elif t == "chat":
-                #     # optionally handle admin-sent chat
-                #     for peer_ws in list(state["peers"]):
-                #         asyncio.create_task(safe_send(peer_ws, msg))
-
         except WebSocketDisconnect:
-            pass
+            print(f"[SERVER] Admin disconnected: {ws.client}")
         finally:
             state["admins"].discard(ws)
 
     else:
-        # A user-peer joins
+        print(f"[SERVER] Peer connected and waiting: {ws.client}  id={id(ws)}")
         state["waiting"].add(ws)
         await safe_send(ws, {"type": "waiting"})
 
-        # Tell all admins someone is waiting
+        # notify all admins
         for admin_ws in state["admins"]:
+            print(f"[SERVER] → notifying admin {admin_ws.client} of new peer id={id(ws)}")
             await safe_send(admin_ws, {
                 "type": "new_waiting",
                 "peer_id": id(ws),
             })
 
-        # Hand off this WebSocket to the admit helper once an admin admits them
-        # (_admit will keep the socket open for the entire handshake + ICE)
+        # hand off this ws to the admit helper
         await _admit(ws, room_id)
