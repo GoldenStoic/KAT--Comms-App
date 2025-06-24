@@ -33,47 +33,37 @@
   <div id="stats">No stats yet</div>
 
   <script>
-    // prompt for a JWT that encodes { role: "admin" } or { role: "user" }
-    const token   = prompt("Enter token (admin or user JWT)");
-    const roomId  = "room1";
+    const token   = prompt("Enter token (admin or user JWT)"),
+          roomId  = "room123",
+          proto   = location.protocol === "https:" ? "wss" : "ws",
+          ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    // choose wss:// if page is HTTPS, else ws://
-    const proto  = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws     = new WebSocket(
-      `${proto}://${window.location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`
-    );
-
-    let ICE_SERVERS = [];
-    let pc, localStream;
-    let hasOffered = false;
+    let ICE_SERVERS = [], pc, localStream, hasOffered = false;
 
     async function loadIceServers() {
-      console.log("[CLIENT] 🔍 Fetching ICE servers from /ice");
+      console.log("🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
-      const data = await res.json();
-      ICE_SERVERS = data.iceServers;
-      console.log("[CLIENT] ✅ ICE_SERVERS loaded:", ICE_SERVERS);
+      ICE_SERVERS = await res.json();
+      console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
-    ws.onopen = () => console.log("[CLIENT] 🔗 WebSocket connected");
-    ws.onclose = () => console.log("[CLIENT] 🔌 WebSocket closed");
+    ws.onopen  = () => console.log("🔗 WebSocket connected");
+    ws.onclose = () => console.log("🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
+      console.log("📩 raw ws msg:", data);
       let msg;
-      try {
-        msg = JSON.parse(data);
-      } catch {
-        console.error("[CLIENT] ❌ Invalid WS JSON:", data);
-        return;
-      }
-      console.log(`[CLIENT] ← ws message type=${msg.type}`, msg);
+      try { msg = JSON.parse(data); }
+      catch { console.error("❌ Invalid WS JSON:", data); return; }
 
       switch (msg.type) {
         case "waiting":
+          console.log("⏳ Received 'waiting'");
           document.getElementById("waiting").style.display = "block";
           break;
 
         case "new_waiting":
+          console.log("👥 Received 'new_waiting'", msg.peer_id);
           document.getElementById("controls").style.display = "block";
           const opt = document.createElement("option");
           opt.value = msg.peer_id;
@@ -82,13 +72,15 @@
           break;
 
         case "admitted":
-          console.log("[CLIENT] → got admitted");
+          console.log("✅ Admitted — UI unlocked, peer_id:", msg.peer_id);
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
-          document.getElementById("controls").style.display = tokenRole()==="admin" ? "block" : "none";
+          document.getElementById("controls").style.display =
+            (tokenRole() === "admin") ? "block" : "none";
           break;
 
         case "ready_for_offer":
+          console.log("📨 ready_for_offer @", performance.now().toFixed(0), "ms");
           if (!hasOffered) {
             hasOffered = true;
             await loadIceServers();
@@ -98,66 +90,63 @@
           break;
 
         case "answer":
-          console.log("[CLIENT] → setting remote answer");
-          await pc.setRemoteDescription({ type:"answer", sdp: msg.sdp });
+          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms, signalingState before:", pc.signalingState);
+          await pc.setRemoteDescription({ type:"answer", sdp:msg.sdp });
           break;
 
         case "ice":
-          console.log("[CLIENT] → adding remote ICE candidate");
-          await pc.addIceCandidate(msg.candidate);
+          console.log("💧 Received ICE candidate from server:", msg.candidate);
+          await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           break;
 
         case "chat":
+          console.log("💬 Received chat from", msg.from, ":", msg.text);
           const log = document.getElementById("chatLog");
-          log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
+          log.insertAdjacentHTML("beforeend", `<div><b>${msg.from}:</b> ${msg.text}</div>`);
           log.scrollTop = log.scrollHeight;
           break;
 
         case "material_event":
+          console.log("📚 Received material_event:", msg.event, msg.payload);
           handleMaterial(msg.event, msg.payload);
           break;
       }
     };
 
     async function startWebRTC() {
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (err) {
-        alert("Microphone access is required: " + err.message);
-        return;
-      }
-
-      console.log("[CLIENT] → creating RTCPeerConnection");
-      pc = new RTCPeerConnection({
-        iceServers: ICE_SERVERS,
-        iceTransportPolicy: "relay"
-      });
+      console.log("🛫 startWebRTC()");
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceTransportPolicy: "relay" });
+      console.log("🔧 RTCPeerConnection created @", performance.now().toFixed(0));
 
       pc.onicecandidate = e => {
         if (e.candidate) {
-          console.log("[CLIENT] → sending local ICE candidate");
+          console.log("💧 Local ICE candidate:", e.candidate);
           ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
         }
       };
-      pc.oniceconnectionstatechange = () => console.log("[CLIENT] 🌐 ICE state:", pc.iceConnectionState);
-      pc.onconnectionstatechange   = () => console.log("[CLIENT] 🔗 Connection state:", pc.connectionState);
+      pc.oniceconnectionstatechange = () => console.log("🌐 ICE state:", pc.iceConnectionState);
+      pc.onconnectionstatechange    = () => console.log("🔗 Connection state:", pc.connectionState);
 
       pc.ontrack = e => {
-        console.log("[CLIENT] 🔊 Received remote track");
-        const audio = new Audio();
+        console.log("🔊 ontrack @", performance.now().toFixed(0));
+        const audio = document.createElement("audio");
         audio.srcObject = e.streams[0];
         audio.autoplay = true;
+        audio.onplaying = () => console.log("▶️ onplaying @", performance.now().toFixed(0));
         document.body.appendChild(audio);
       };
 
-      for (const t of localStream.getTracks()) {
+      localStream.getTracks().forEach(t => {
         pc.addTrack(t, localStream);
-      }
+        console.log("➕ Added local track:", t.kind);
+      });
 
       pc.onnegotiationneeded = async () => {
-        console.log("[CLIENT] → negotiationneeded, creating offer");
+        console.log("✈️ negotiationneeded @", performance.now().toFixed(0));
         await pc.setLocalDescription(await pc.createOffer());
         ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
+        console.log("✉️ Offer sent");
       };
     }
 
@@ -165,46 +154,47 @@
       setInterval(async () => {
         if (!pc) return;
         const stats = await pc.getStats();
-        let out = "";
+        let out = "", now = performance.now().toFixed(0);
         stats.forEach(r => {
-          if (r.type==="inbound-rtp" && r.kind==="audio") {
-            const rtt = (r.roundTripTime||r.currentRoundTripTime||0).toFixed(3);
-            const jit = r.jitter.toFixed(3);
-            out += `RTT:${rtt}s  jitter:${jit}s\n`;
+          if (r.type === "inbound-rtp" && r.kind === "audio") {
+            const rtt = (r.roundTripTime||r.currentRoundTripTime||0).toFixed(3),
+                  jb  = (r.jitterBufferDelay||0).toFixed(3),
+                  em  = r.jitterBufferEmittedCount||0;
+            out += `⏱ RTT:${rtt}s  jBufDelay:${jb}s  emitCount:${em}\n`;
+          }
+          if (r.type === "candidate-pair" && r.state === "succeeded") {
+            out += `🔄 cand-pair RTT:${(r.currentRoundTripTime||0).toFixed(3)}s\n`;
           }
         });
-        document.getElementById("stats").textContent = out || "no audio stats yet";
+        document.getElementById("stats").textContent = `@${now}ms\n` + out;
       }, 3000);
     }
 
+    // UI handlers…
     document.getElementById("sendBtn").onclick = () => {
       const txt = document.getElementById("msgIn").value;
-      ws.send(JSON.stringify({ type:"chat", from: tokenRole(), text: txt }));
+      console.log("📤 Sending chat:", txt);
+      ws.send(JSON.stringify({ type:"chat", from:tokenRole(), text:txt }));
       document.getElementById("msgIn").value = "";
     };
     document.getElementById("admitBtn").onclick = () => {
-      const peer = +document.getElementById("waitingList").value;
-      console.log("[CLIENT] → admin sending admit for peer_id=", peer);
-      ws.send(JSON.stringify({ type:"admit", peer_id: peer }));
+      const pid = +document.getElementById("waitingList").value;
+      console.log("✅ Admin admitting peer_id:", pid);
+      ws.send(JSON.stringify({ type:"admit", peer_id:pid }));
     };
-    document.getElementById("nextSlide").onclick = () => {
+    document.getElementById("nextSlide").onclick = () =>
       ws.send(JSON.stringify({ type:"material_event", event:"next_slide" }));
-    };
-    document.getElementById("startQuiz").onclick = () => {
-      ws.send(JSON.stringify({
-        type:"material_event", event:"start_quiz", payload:{ quizId:42 }
-      }));
-    };
+    document.getElementById("startQuiz").onclick = () =>
+      ws.send(JSON.stringify({ type:"material_event", event:"start_quiz", payload:{ quizId:42 } }));
 
     function tokenRole() {
       try { return JSON.parse(atob(token.split(".")[1])).role; }
       catch { return "user"; }
     }
-
-    function handleMaterial(event, payload) {
+    function handleMaterial(evt,p) {
       const mat = document.getElementById("material");
-      if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
-      if (event === "start_quiz") mat.innerHTML += `<p>❓ Quiz ${payload.quizId}</p>`;
+      if (evt==="next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
+      if (evt==="start_quiz") mat.innerHTML += `<p>❓ Quiz ${p.quizId}</p>`;
     }
   </script>
 </body>
