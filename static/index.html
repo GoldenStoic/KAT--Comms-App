@@ -33,10 +33,13 @@
   <div id="stats">No stats yet</div>
 
   <script>
+    // prompt for a JWT that encodes { role: "admin" } or { role: "user" }
     const token   = prompt("Enter token (admin or user JWT)");
     const roomId  = "room1";
-    const proto   = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws      = new WebSocket(
+
+    // choose wss:// if page is HTTPS, else ws://
+    const proto  = window.location.protocol === "https:" ? "wss" : "ws";
+    const ws     = new WebSocket(
       `${proto}://${window.location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`
     );
 
@@ -48,7 +51,8 @@
       console.log("🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
       const data = await res.json();
-      ICE_SERVERS = data.iceServers;
+      // ← only this line has changed: we now use the response as-is, since it's already an Array
+      ICE_SERVERS = data;
       console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
@@ -59,8 +63,8 @@
       let msg;
       try { msg = JSON.parse(data); }
       catch { console.error("❌ Invalid WS JSON:", data); return; }
-      console.log("📩 raw ws msg:", data);
 
+      console.log("📩 raw ws msg:", data);
       switch (msg.type) {
         case "waiting":
           console.log("⏳ Received 'waiting'");
@@ -93,7 +97,7 @@
           break;
 
         case "answer":
-          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms");
+          console.log("🔄 Received answer @", performance.now().toFixed(0), "ms, signalingState before:", pc.signalingState);
           await pc.setRemoteDescription({ type:"answer", sdp: msg.sdp });
           break;
 
@@ -129,7 +133,6 @@
       pc.oniceconnectionstatechange = () => console.log("🌐 ICE state:", pc.iceConnectionState);
       pc.onconnectionstatechange   = () => console.log("🔗 Connection state:", pc.connectionState);
 
-      // ←——— RESTORED AUDIO HANDLER ———→
       pc.ontrack = e => {
         console.log("🔊 ontrack @", performance.now().toFixed(0));
         const audio = document.createElement("audio");
@@ -139,7 +142,6 @@
         document.body.appendChild(audio);
         audio.play().catch(err => console.warn("audio.play() failed:", err));
       };
-      // ←—————————————— end change ————————————————→
 
       for (const t of localStream.getTracks()) {
         pc.addTrack(t, localStream);
@@ -159,7 +161,7 @@
         if (!pc) return;
         const stats = await pc.getStats();
         stats.forEach(r => {
-          if (r.type === "inbound-rtp" && r.kind === "audio") {
+          if (r.type==="inbound-rtp" && r.kind==="audio") {
             console.log(`⏱ RTT:${(r.roundTripTime||0).toFixed(3)}s  jitter:${r.jitter.toFixed(3)}s`);
           }
         });
@@ -189,6 +191,7 @@
       try { return JSON.parse(atob(token.split(".")[1])).role; }
       catch { return "user"; }
     }
+
     function handleMaterial(event, payload) {
       const mat = document.getElementById("material");
       if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";
