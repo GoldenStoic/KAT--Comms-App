@@ -11,7 +11,7 @@ from aiortc import (
     RTCConfiguration,
     RTCIceCandidate,
 )
-from aiortc.contrib.media import MediaRelay
+from aiortc.contrib.media import MediaRelay, MediaBlackhole
 from twilio.rest import Client
 
 print(">>> SERVER running under:", sys.executable)
@@ -70,7 +70,7 @@ async def _admit(ws: WebSocket, room_id: str):
     pc      = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
-    # Forward all live incoming audio tracks (not relay instances!)
+    # Forward all existing live tracks to this new peer
     for track in state["audio_tracks"]:
         relay_track = relay.subscribe(track)
         global_audio_relays.append(relay_track)
@@ -79,12 +79,21 @@ async def _admit(ws: WebSocket, room_id: str):
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
+            print(f"🔈 Received audio track from {id(ws)}")
             state["audio_tracks"].append(track)
+
+            delivered = False
             for other_ws, other_pc in state["peers"].items():
                 if other_pc is not pc:
                     relay_track = relay.subscribe(track)
                     global_audio_relays.append(relay_track)
                     other_pc.addTrack(relay_track)
+                    delivered = True
+
+            if not delivered:
+                print("📡 No active consumers — starting MediaBlackhole to avoid buffer buildup")
+                blackhole = MediaBlackhole()
+                asyncio.ensure_future(blackhole.start(track))
 
     await ws.send_json({"type":"ready_for_offer"})
 
