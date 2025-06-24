@@ -33,17 +33,20 @@
   <div id="stats">No stats yet</div>
 
   <script>
-    // --- initialize
+    // prompt for a JWT that encodes { role: "admin" } or { role: "user" }
     const token   = prompt("Enter token (admin or user JWT)");
-    const roomId  = "room1";  // or dynamically
-    const proto   = location.protocol === "https:" ? "wss" : "ws";
-    const ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+    const roomId  = "room1";
+
+    // choose wss:// if page is HTTPS, else ws://
+    const proto  = window.location.protocol === "https:" ? "wss" : "ws";
+    const ws     = new WebSocket(
+      `${proto}://${window.location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`
+    );
 
     let ICE_SERVERS = [];
     let pc, localStream;
     let hasOffered = false;
 
-    // --- fetch TURN creds from server
     async function loadIceServers() {
       console.log("🔍 Fetching ICE servers from /ice");
       const res = await fetch("/ice");
@@ -51,24 +54,21 @@
       console.log("✅ ICE_SERVERS loaded:", ICE_SERVERS);
     }
 
-    // --- WebSocket events
     ws.onopen = () => console.log("🔗 WebSocket connected");
     ws.onclose = () => console.log("🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
-      console.log("📩 raw ws msg:", data);
       let msg;
       try { msg = JSON.parse(data); }
       catch { console.error("❌ Invalid WS JSON:", data); return; }
 
+      console.log("📩 ws msg:", msg);
       switch (msg.type) {
         case "waiting":
-          console.log("⏳ got 'waiting'");
           document.getElementById("waiting").style.display = "block";
           break;
 
         case "new_waiting":
-          console.log("👥 got 'new_waiting'", msg.peer_id);
           document.getElementById("controls").style.display = "block";
           const opt = document.createElement("option");
           opt.value = msg.peer_id;
@@ -77,14 +77,12 @@
           break;
 
         case "admitted":
-          console.log("✅ got 'admitted'", msg.peer_id);
           document.getElementById("waiting").style.display  = "none";
           document.getElementById("chat").style.display     = "block";
           document.getElementById("controls").style.display = tokenRole()==="admin" ? "block" : "none";
           break;
 
         case "ready_for_offer":
-          console.log("📨 got 'ready_for_offer'");
           if (!hasOffered) {
             hasOffered = true;
             await loadIceServers();
@@ -94,90 +92,65 @@
           break;
 
         case "answer":
-          console.log("🔄 setting answer, state=", pc.signalingState);
           await pc.setRemoteDescription({ type:"answer", sdp: msg.sdp });
           break;
 
         case "ice":
-          console.log("💧 adding ICE candidate from server");
-          // the server already wrapped this into a proper object
           await pc.addIceCandidate(msg.candidate);
           break;
 
         case "chat":
-          console.log("💬 chat", msg.from, msg.text);
           const log = document.getElementById("chatLog");
           log.innerHTML += `<div><b>${msg.from}:</b> ${msg.text}</div>`;
           log.scrollTop = log.scrollHeight;
           break;
 
         case "material_event":
-          console.log("📚 material_event", msg.event, msg.payload);
           handleMaterial(msg.event, msg.payload);
           break;
-
-        default:
-          console.warn("❓ unknown msg.type", msg.type);
       }
     };
 
-    // --- start WebRTC when server says so
     async function startWebRTC() {
-      console.log("🛫 startWebRTC()");
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        console.log("🎤 getUserMedia succeeded");
       } catch (err) {
-        console.error("❌ getUserMedia failed", err);
         alert("Microphone access is required: " + err.message);
         return;
       }
 
       pc = new RTCPeerConnection({
         iceServers: ICE_SERVERS,
-        iceTransportPolicy: "relay"   // force TURN
+        iceTransportPolicy: "relay" // TURN-only
       });
-      console.log("🔧 RTCPeerConnection created, signalingState:", pc.signalingState);
 
       pc.onicecandidate = e => {
         if (e.candidate) {
-          console.log("💧 local ICE candidate");
           ws.send(JSON.stringify({ type:"ice", candidate:e.candidate.toJSON() }));
         }
       };
-
-      pc.oniceconnectionstatechange = () => {
-        console.log("🌐 ICE state:", pc.iceConnectionState);
-      };
-      pc.onconnectionstatechange = () => {
-        console.log("🔗 Connection state:", pc.connectionState);
-      };
+      pc.oniceconnectionstatechange = () => console.log("🌐 ICE state:", pc.iceConnectionState);
+      pc.onconnectionstatechange   = () => console.log("🔗 Connection state:", pc.connectionState);
 
       pc.ontrack = e => {
-        console.log("🔊 Remote track received");
-        const audio = document.createElement("audio");
+        console.log("🔊 Remote track");
+        const audio = new Audio();
         audio.srcObject = e.streams[0];
         audio.autoplay = true;
-        audio.onplaying = () => console.log("▶️ audio.onplaying");
         document.body.appendChild(audio);
       };
 
-      // add mic track
-      localStream.getTracks().forEach(t => {
+      // add mic
+      for (const t of localStream.getTracks()) {
         pc.addTrack(t, localStream);
-        console.log("➕ Added local track:", t.kind);
-      });
+      }
 
-      // negotiate
       pc.onnegotiationneeded = async () => {
-        console.log("✈️ negotiationneeded");
         await pc.setLocalDescription(await pc.createOffer());
-        console.log("📤 offer sent");
         ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription.sdp }));
       };
     }
 
-    // --- periodically pull stats
     function monitorStats() {
       setInterval(async () => {
         if (!pc) return;
@@ -190,12 +163,10 @@
             out += `RTT:${rtt}s  jitter:${jit}s\n`;
           }
         });
-        document.getElementById("stats").textContent = out || "stats not yet available";
-        console.log("📊 stats\n" + out);
+        document.getElementById("stats").textContent = out || "no audio stats yet";
       }, 3000);
     }
 
-    // --- UI event handlers
     document.getElementById("sendBtn").onclick = () => {
       const txt = document.getElementById("msgIn").value;
       ws.send(JSON.stringify({ type:"chat", from: tokenRole(), text: txt }));
@@ -214,11 +185,11 @@
       }));
     };
 
-    // --- helpers
     function tokenRole() {
       try { return JSON.parse(atob(token.split(".")[1])).role; }
       catch { return "user"; }
     }
+
     function handleMaterial(event, payload) {
       const mat = document.getElementById("material");
       if (event === "next_slide") mat.innerHTML += "<p>➡️ Next slide</p>";

@@ -1,9 +1,9 @@
 # server.py
+
 import os
 import sys
 import asyncio
 import jwt
-from types import SimpleNamespace
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
+    RTCIceCandidate,
     RTCIceServer,
     RTCConfiguration,
 )
@@ -30,40 +31,81 @@ twilio_client = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
 # ─── JWT config ────────────────────────────────────────────────────────────────
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-to-a-strong-secret")
 
-# ─── In-memory room state ───────────────────────────────────────────────────────
-# rooms: room_id → { admins:set, waiting:set, peers:dict }
-rooms = {}
+# ─── In-memory room state & media relay ────────────────────────────────────────
+rooms = {}  # room_id → { admins:set, waiting:set, peers:dict }
 relay = MediaRelay()
 
 app = FastAPI()
+# serve our client HTML+JS from static/index.html
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-# ─── Normalize Twilio ICE dict ────────────────────────────────────────────────
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
 def normalize_ice_server(s: dict) -> dict:
+    """
+    Twilio returns ICE servers with either 'url' or 'urls'.
+    Normalize to always have 'urls'.
+    """
     d = dict(s)
     if "url" in d:
-        # Twilio sometimes returns "url" instead of "urls"
         d["urls"] = [d.pop("url")]
     return d
 
 
-# ─── /ice endpoint returns TURN+STUN credentials ───────────────────────────────
-@app.get("/ice")
-async def ice():
-    token = twilio_client.tokens.create()
-    servers = [normalize_ice_server(s) for s in token.ice_servers]
-    return JSONResponse(servers)
+def parse_candidate(c: dict) -> RTCIceCandidate:
+    """
+    Convert the dictionary we received over WebSocket
+    into a proper aiortc.RTCIceCandidate instance.
+    """
+    s = c["candidate"]
+    parts = s.split()
+    foundation = parts[0].split(":", 1)[1]
+    component = int(parts[1])
+    protocol = parts[2].lower()
+    priority = int(parts[3])
+    ip = parts[4]
+    port = int(parts[5])
+    typ = parts[7]
+
+    # optional fields
+    relatedAddress = None
+    relatedPort = None
+    tcpType = None
+    i = 8
+    while i < len(parts):
+        if parts[i] == "raddr":
+            relatedAddress = parts[i+1]
+            i += 2
+        elif parts[i] == "rport":
+            relatedPort = int(parts[i+1])
+            i += 2
+        elif parts[i] == "tcptype":
+            tcpType = parts[i+1]
+            i += 2
+        else:
+            i += 1
+
+    return RTCIceCandidate(
+        component=component,
+        foundation=foundation,
+        ip=ip,
+        port=port,
+        priority=priority,
+        protocol=protocol,
+        type=typ,
+        relatedAddress=relatedAddress,
+        relatedPort=relatedPort,
+        sdpMid=c.get("sdpMid"),
+        sdpMLineIndex=c.get("sdpMLineIndex"),
+        tcpType=tcpType
+    )
 
 
-# ─── Serve the HTML/JS ─────────────────────────────────────────────────────────
-@app.get("/")
-async def index():
-    return FileResponse("static/index.html")
-
-
-# ─── Simple JWT auth (admin vs user) ───────────────────────────────────────────
 async def authenticate(token: str) -> str:
+    """
+    Very simple JWT-based role extraction.
+    """
     try:
         data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return data.get("role", "user")
@@ -71,15 +113,33 @@ async def authenticate(token: str) -> str:
         return "user"
 
 
-# ─── Admit helper: wire up a new RTCPeerConnection ─────────────────────────────
+# ─── ICE endpoint ─────────────────────────────────────────────────────────────
+@app.get("/ice")
+async def ice():
+    """
+    Fetch fresh Twilio ICE credentials (STUN + TURN),
+    return them verbatim (we force TURN on the client).
+    """
+    token = twilio_client.tokens.create()
+    servers = [normalize_ice_server(s) for s in token.ice_servers]
+    return JSONResponse(servers)
+
+
+# ─── Serve client ─────────────────────────────────────────────────────────────
+@app.get("/")
+async def index():
+    return FileResponse("static/index.html")
+
+
+# ─── Admit helper ──────────────────────────────────────────────────────────────
 async def _admit(ws: WebSocket, room_id: str):
     state = rooms[room_id]
     state["waiting"].discard(ws)
 
-    # tell client it’s been admitted
+    # signal client that it's been admitted
     await ws.send_json({"type": "admitted", "peer_id": id(ws)})
 
-    # fetch fresh TURN+STUN servers
+    # grab fresh STUN+TURN
     token = twilio_client.tokens.create()
     ice_servers = [
         RTCIceServer(**normalize_ice_server(s))
@@ -90,7 +150,7 @@ async def _admit(ws: WebSocket, room_id: str):
     pc = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
-    # ─── trickle ICE: send each local candidate to the browser ────────────────
+    # trickle ICE → forward each candidate to the browser
     @pc.on("icecandidate")
     async def on_icecandidate(candidate):
         if candidate:
@@ -103,45 +163,38 @@ async def _admit(ws: WebSocket, room_id: str):
                 }
             })
 
-    # ─── when a remote audio track arrives, forward it live to everyone else ──
+    # live-only audio forwarding (no backlog)
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
-            relay_track = relay.subscribe(track)
+            relay_track = relay.subscribe(track, buffered=False)
             for peer_ws, other_pc in state["peers"].items():
-                if peer_ws is not ws:
+                if peer_ws != ws:
                     other_pc.addTrack(relay_track)
 
-    # ─── tell client to start negotiation ─────────────────────────────────────
+    # tell client to kick off WebRTC
     await ws.send_json({"type": "ready_for_offer"})
 
-    # ─── receive offer, set it, create & send answer ──────────────────────────
+    # get their offer, answer it
     offer_msg = await ws.receive_json()
     offer = RTCSessionDescription(sdp=offer_msg["sdp"], type=offer_msg["type"])
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # wait for ICE gathering to finish
+    # wait for ICE gathering to finish so our SDP has all candidates
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.1)
-
     await ws.send_json({"type": "answer", "sdp": pc.localDescription.sdp})
 
-    # ─── then handle incoming WS messages ──────────────────────────────────────
     try:
+        # now handle any incoming WS messages (ice, chat, admits, material, etc.)
         while True:
             msg = await ws.receive_json()
             typ = msg.get("type")
 
             if typ == "ice":
-                # wrap the incoming dict so aiortc sees attributes, not keys
-                c = msg["candidate"]
-                cand = SimpleNamespace(
-                    candidate=c["candidate"],
-                    sdpMid=c.get("sdpMid"),
-                    sdpMLineIndex=c.get("sdpMLineIndex"),
-                )
+                cand = parse_candidate(msg["candidate"])
                 await pc.addIceCandidate(cand)
 
             elif typ == "chat":
@@ -169,7 +222,7 @@ async def _admit(ws: WebSocket, room_id: str):
     except WebSocketDisconnect:
         pass
     finally:
-        # clean up on disconnect
+        # cleanup
         state["admins"].discard(ws)
         state["waiting"].discard(ws)
         old_pc = state["peers"].pop(ws, None)
@@ -180,7 +233,7 @@ async def _admit(ws: WebSocket, room_id: str):
             await old_pc.close()
 
 
-# ─── WebSocket entrypoint ──────────────────────────────────────────────────────
+# ─── WebSocket entry point ────────────────────────────────────────────────────
 @app.websocket("/ws/{room_id}")
 async def ws_endpoint(ws: WebSocket, room_id: str):
     await ws.accept()
@@ -194,16 +247,16 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
     if role == "admin":
         state["admins"].add(ws)
         await _admit(ws, room_id)
-        # notify admin of anyone already waiting
+        # tell admin about anyone already waiting
         for pending in state["waiting"]:
             await ws.send_json({"type": "new_waiting", "peer_id": id(pending)})
 
     else:
         state["waiting"].add(ws)
         await ws.send_json({"type": "waiting"})
-        # inform admin
+        # notify admins
         for admin_ws in state["admins"]:
             await admin_ws.send_json({"type": "new_waiting", "peer_id": id(ws)})
-        # block until admitted
+        # block until we move from waiting to peers
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
