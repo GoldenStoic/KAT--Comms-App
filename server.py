@@ -1,5 +1,3 @@
-# server.py
-
 import os, sys, asyncio, jwt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -42,7 +40,7 @@ GLOBAL_ICE = [ normalize_ice_server(s) for s in initial_token.ice_servers ]
 app        = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 relay      = MediaRelay()
-rooms      = {}   # room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
+rooms      = {}   # room_id → { admins:set, waiting:set, peers:dict }
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this")
 
 @app.get("/ice")
@@ -72,42 +70,16 @@ async def _admit(ws: WebSocket, room_id: str):
     pc      = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
-    # forward any existing relay_tracks so new peer hears immediately
-    for t in state["audio_tracks"]:
-        pc.addTrack(t)
-
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
+            # only new live tracks get relayed from here on
             relay_track = relay.subscribe(track)
-            state["audio_tracks"].append(relay_track)
-            for other in state["peers"].values():
-                if other is not pc:
-                    other.addTrack(relay_track)
+            for other_pc in state["peers"].values():
+                if other_pc is not pc:
+                    other_pc.addTrack(relay_track)
 
     await ws.send_json({"type":"ready_for_offer"})
-
-@app.websocket("/ws/{room_id}")
-async def ws_endpoint(ws: WebSocket, room_id: str):
-    await ws.accept()
-    role  = await authenticate(ws.query_params.get("token",""))
-    state = rooms.setdefault(
-        room_id,
-        {"admins":set(), "waiting":set(), "peers":{}, "audio_tracks":[]}
-    )
-
-    if role == "admin":
-        state["admins"].add(ws)
-        await _admit(ws, room_id)
-        for pending in state["waiting"]:
-            await ws.send_json({"type":"new_waiting","peer_id":id(pending)})
-    else:
-        state["waiting"].add(ws)
-        await ws.send_json({"type":"waiting"})
-        for adm in state["admins"]:
-            await adm.send_json({"type":"new_waiting","peer_id":id(ws)})
-        while ws not in state["peers"]:
-            await asyncio.sleep(0.1)
 
     try:
         while True:
@@ -115,16 +87,12 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
             typ = msg.get("type")
 
             if typ == "offer":
-                pc = state["peers"][ws]
-                # 1) set the remote offer
+                # set remote, create patched answer, send it
                 await pc.setRemoteDescription(
                     RTCSessionDescription(sdp=msg["sdp"], type="offer")
                 )
-                # 2) create answer
                 answer = await pc.createAnswer()
-
-                # 3) patch SDP: ensure each audio m-line has 'a=sendrecv',
-                #    and force 20 ms packetization to cut down buffering
+                # patch SDP unchanged from your existing server.py
                 lines = answer.sdp.splitlines()
                 new_lines = []
                 for line in lines:
@@ -135,16 +103,13 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                         new_lines.append("a=maxptime:20")
                 patched_sdp = "\r\n".join(new_lines) + "\r\n"
 
-                # 4) setLocalDescription with patched SDP
                 await pc.setLocalDescription(
                     RTCSessionDescription(sdp=patched_sdp, type="answer")
                 )
-                # 5) send it back
                 await ws.send_json({"type":"answer","sdp":pc.localDescription.sdp})
 
             elif typ == "ice":
-                pc = state["peers"][ws]
-                c  = msg["candidate"]
+                c = msg["candidate"]
                 parts = c["candidate"].split()
                 cand = RTCIceCandidate(
                     foundation=parts[0].split(":",1)[1],
@@ -192,3 +157,28 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 if sender.track:
                     sender.track.stop()
             await pc.close()
+
+@app.websocket("/ws/{room_id}")
+async def ws_endpoint(ws: WebSocket, room_id: str):
+    await ws.accept()
+    role  = await authenticate(ws.query_params.get("token",""))
+    state = rooms.setdefault(
+        room_id,
+        {"admins":set(), "waiting":set(), "peers":{}}
+    )
+
+    if role == "admin":
+        state["admins"].add(ws)
+        await _admit(ws, room_id)
+        for pending in state["waiting"]:
+            await ws.send_json({"type":"new_waiting","peer_id":id(pending)})
+    else:
+        state["waiting"].add(ws)
+        await ws.send_json({"type":"waiting"})
+        for adm in state["admins"]:
+            await adm.send_json({"type":"new_waiting","peer_id":id(ws)})
+
+        # wait until admitted: then do full handshake
+        while ws not in state["peers"]:
+            await asyncio.sleep(0.1)
+        await _admit(ws, room_id)
