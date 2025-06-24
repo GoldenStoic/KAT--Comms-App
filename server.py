@@ -41,7 +41,7 @@ GLOBAL_ICE = [ normalize_ice_server(s) for s in initial_token.ice_servers ]
 app        = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 relay      = MediaRelay()
-rooms      = {}   # room_id → { admins:set, waiting:set, peers:dict }
+rooms      = {}   # room_id → { admins:set, waiting:set, peers:dict, audio_tracks:list }
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this")
 global_audio_relays = []  # prevent GC of relay tracks
 
@@ -70,11 +70,16 @@ async def _admit(ws: WebSocket, room_id: str):
     pc      = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
-    # no pre-added tracks; only forward new ones in on_track()
+    # Forward all live incoming audio tracks (not relay instances!)
+    for track in state["audio_tracks"]:
+        relay_track = relay.subscribe(track)
+        global_audio_relays.append(relay_track)
+        pc.addTrack(relay_track)
 
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
+            state["audio_tracks"].append(track)
             for other_ws, other_pc in state["peers"].items():
                 if other_pc is not pc:
                     relay_track = relay.subscribe(track)
@@ -89,7 +94,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
     role  = await authenticate(ws.query_params.get("token",""))
     state = rooms.setdefault(
         room_id,
-        {"admins":set(), "waiting":set(), "peers":{}}
+        {"admins":set(), "waiting":set(), "peers":{}, "audio_tracks":[]}
     )
 
     if role == "admin":
