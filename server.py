@@ -55,7 +55,7 @@ async def authenticate(token: str):
         data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return data.get("role", "user")
     except:
-        # fallback if you typed "admin" or "user" at the prompt
+        # allow literal "admin"/"user" for testing
         return token if token in ("admin", "user") else "user"
 
 async def _admit(ws: WebSocket, room_id: str):
@@ -65,6 +65,8 @@ async def _admit(ws: WebSocket, room_id: str):
     """
     state = rooms[room_id]
     state["waiting"].discard(ws)
+
+    # notify client
     await ws.send_json({"type":"admitted","peer_id":id(ws)})
 
     # build PeerConnection with TURN-only ICE
@@ -73,19 +75,20 @@ async def _admit(ws: WebSocket, room_id: str):
     pc      = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
+    # ——— ADD EXISTING LIVE TRACKS TO NEW PEER ———
+    for t in state["audio_tracks"]:
+        pc.addTrack(t)
+    # ———————————————————————————————
+
     @pc.on("track")
     def on_track(track):
         if track.kind == "audio":
-            # relay *new* live audio to all peers
+            # relay only _new_ live audio
             relay_track = relay.subscribe(track)
             state["audio_tracks"].append(relay_track)
             for other_pc in state["peers"].values():
                 if other_pc is not pc:
                     other_pc.addTrack(relay_track)
-
-    # *** Removed backlog forwarding loop here ***
-    #     for old in state["audio_tracks"]:
-    #         pc.addTrack(old)
 
     # tell client to send offer
     await ws.send_json({"type":"ready_for_offer"})
@@ -96,12 +99,11 @@ async def _admit(ws: WebSocket, room_id: str):
             typ = msg.get("type")
 
             if typ == "offer":
-                # set remote, create low-latency answer, send it
+                # handle offer → low-latency patched answer
                 await pc.setRemoteDescription(
                     RTCSessionDescription(sdp=msg["sdp"], type="offer")
                 )
                 answer = await pc.createAnswer()
-                # patch SDP for 20ms ptime
                 lines, out = answer.sdp.splitlines(), []
                 for L in lines:
                     out.append(L)
@@ -114,7 +116,7 @@ async def _admit(ws: WebSocket, room_id: str):
                 await ws.send_json({"type":"answer","sdp":pc.localDescription.sdp})
 
             elif typ == "ice":
-                # add ICE candidate
+                # ICE candidate from peer
                 c = msg["candidate"]
                 parts = c["candidate"].split()
                 cand = RTCIceCandidate(
@@ -134,7 +136,7 @@ async def _admit(ws: WebSocket, room_id: str):
                     pass
 
             elif typ == "chat":
-                # broadcast chat
+                # broadcast chat to all peers
                 for peer in state["peers"]:
                     await peer.send_json(msg)
 
@@ -185,6 +187,7 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
         for adm in state["admins"]:
             await adm.send_json({"type":"new_waiting","peer_id":id(ws)})
 
-        # block until admitted
+        # block until admin admits → then full handshake
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
+        await _admit(ws, room_id)
