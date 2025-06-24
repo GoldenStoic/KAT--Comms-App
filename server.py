@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aiortc import (
     RTCPeerConnection,
+    RTCConfiguration,
     RTCSessionDescription,
     RTCIceCandidate,
     RTCIceServer,
@@ -32,34 +33,22 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 
 async def safe_send(ws: WebSocket, message: dict):
-    """
-    Wrap ws.send_json so that if the socket is already closed we swallow the error.
-    """
     try:
         await ws.send_json(message)
     except (WebSocketDisconnect, RuntimeError):
         # socket already closed—ignore
         pass
 
-
 def normalize_ice_server(spec) -> dict:
-    """
-    Take Twilio's ICE‐server spec (a dict or an object with a to_dict() / _properties)
-    and return ONLY the keys RTCIceServer() accepts: urls, username, credential.
-    """
-    # get a plain dict
     if hasattr(spec, "to_dict"):
         d = spec.to_dict()
     elif hasattr(spec, "_properties"):
         d = dict(spec._properties)
     else:
         d = dict(spec)
-
-    # Twilio sometimes uses "url" instead of "urls"
+    # Twilio sometimes returns "url" instead of "urls"
     if "url" in d and "urls" not in d:
         d["urls"] = [d.pop("url")]
-
-    # now filter to exactly the arguments RTCIceServer wants
     allowed = {}
     if "urls" in d:
         allowed["urls"] = d["urls"]
@@ -69,11 +58,7 @@ def normalize_ice_server(spec) -> dict:
         allowed["credential"] = d["credential"]
     return allowed
 
-
 def parse_ice_candidate(line: str) -> RTCIceCandidate:
-    """
-    Convert a single ICE candidate line into an RTCIceCandidate.
-    """
     parts = line.strip().split()
     component = int(parts[1].split("=")[1])
     foundation = parts[2].split("=")[1]
@@ -100,27 +85,22 @@ def parse_ice_candidate(line: str) -> RTCIceCandidate:
         else:
             i += 1
 
-    obj = {
-        "component": component,
-        "foundation": foundation,
-        "priority": priority,
-        "ip": ip,
-        "port": port,
-        "protocol": protocol,
-        "type": typ,
-        "relatedAddress": relatedAddress,
-        "relatedPort": relatedPort,
-        "sdpMid": None,
-        "sdpMLineIndex": None,
-        "tcpType": tcpType,
-    }
-    return RTCIceCandidate(**obj)
-
+    return RTCIceCandidate(
+        component=component,
+        foundation=foundation,
+        priority=priority,
+        ip=ip,
+        port=port,
+        protocol=protocol,
+        type=typ,
+        relatedAddress=relatedAddress,
+        relatedPort=relatedPort,
+        sdpMid=None,
+        sdpMLineIndex=None,
+        tcpType=tcpType,
+    )
 
 async def authenticate(token: str) -> str:
-    """
-    Simple JWT‐based role extractor.
-    """
     try:
         data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return data.get("role", "user")
@@ -139,9 +119,6 @@ twilio_client = TwilioClient(
 # ─── ICE endpoint ────────────────────────────────────────────────────────────────
 @app.get("/ice")
 async def ice():
-    """
-    Return STUN/TURN servers to the client.
-    """
     token = twilio_client.tokens.create()
     ice_servers = [
         RTCIceServer(**normalize_ice_server(s))
@@ -173,7 +150,9 @@ async def _admit(ws: WebSocket, room_id: str):
         for s in token.ice_servers
     ]
 
-    pc = RTCPeerConnection({"iceServers": ice_servers})
+    # <<< CHANGE HERE: wrap in RTCConfiguration >>>
+    config = RTCConfiguration(iceServers=ice_servers)
+    pc = RTCPeerConnection(configuration=config)
     state["peers"][ws] = pc
 
     @pc.on("icecandidate")
@@ -213,7 +192,6 @@ async def _admit(ws: WebSocket, room_id: str):
                 cand.sdpMid = msg.get("sdpMid")
                 cand.sdpMLineIndex = msg.get("sdpMLineIndex")
                 await pc.addIceCandidate(cand)
-
     except WebSocketDisconnect:
         pass
     finally:
@@ -253,7 +231,6 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 "type": "new_waiting",
                 "peer_id": id(ws),
             })
-        # wait until an admin admits us
         while ws not in state["peers"]:
             await asyncio.sleep(0.1)
 
