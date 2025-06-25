@@ -1,10 +1,8 @@
-# server.py (updated to force ptime=10 and ensure correct Opus handling)
-
+# server.py
 import os, sys, asyncio, jwt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
 from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
@@ -16,13 +14,11 @@ from aiortc import (
 from twilio.rest import Client
 
 print(">>> SERVER running under:", sys.executable)
-print(">>> jwt module path:", getattr(jwt, "__file__", None))
-
-TW_ACCOUNT_SID    = os.environ["TWILIO_ACCOUNT_SID"]
-TW_API_KEY_SID    = os.environ["TWILIO_API_KEY_SID"]
+TW_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
+TW_API_KEY_SID = os.environ["TWILIO_API_KEY_SID"]
 TW_API_KEY_SECRET = os.environ["TWILIO_API_KEY_SECRET"]
-twilio_client     = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
-initial_token     = twilio_client.tokens.create()
+twilio_client = Client(TW_API_KEY_SID, TW_API_KEY_SECRET, TW_ACCOUNT_SID)
+initial_token = twilio_client.tokens.create()
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -55,25 +51,23 @@ async def authenticate(token):
 
 class ForwardedAudioTrack(MediaStreamTrack):
     kind = "audio"
-
     def __init__(self, source_track):
         super().__init__()
         self.source = source_track
-        self._latest_frame = None
-        self._queue_task = asyncio.create_task(self._pull_loop())
+        self.latest = None
+        self._task = asyncio.create_task(self._run())
 
-    async def _pull_loop(self):
+    async def _run(self):
         while True:
             try:
-                frame = await self.source.recv()
-                self._latest_frame = frame
-            except Exception:
+                self.latest = await self.source.recv()
+            except:
                 break
 
     async def recv(self):
-        while self._latest_frame is None:
+        while self.latest is None:
             await asyncio.sleep(0.005)
-        return self._latest_frame
+        return self.latest
 
 async def _admit(ws, room_id):
     state = rooms[room_id]
@@ -126,39 +120,36 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 await pc.setRemoteDescription(RTCSessionDescription(sdp=msg["sdp"], type="offer"))
                 answer = await pc.createAnswer()
 
+                # Force optimized Opus settings
                 lines = answer.sdp.splitlines()
                 new_lines = []
                 for line in lines:
                     new_lines.append(line)
-                if line.startswith("m=audio"):
-                    new_lines.append("a=sendrecv")
-                    new_lines.append("a=rtpmap:111 opus/48000/2")
-                    new_lines.append("a=fmtp:111 minptime=10;useinbandfec=1;stereo=0;maxplaybackrate=48000;sprop-maxcapturerate=48000;maxaveragebitrate=64000;ptime=20")
-
+                    if line.startswith("m=audio"):
+                        new_lines += [
+                            "a=sendrecv",
+                            "a=rtpmap:111 opus/48000/2",
+                            "a=fmtp:111 minptime=10;useinbandfec=1;usedtx=1;maxaveragebitrate=32000;stereo=0",
+                            "a=ptime:10"
+                        ]
                 patched_sdp = "\r\n".join(new_lines) + "\r\n"
-
                 await pc.setLocalDescription(RTCSessionDescription(sdp=patched_sdp, type="answer"))
                 await ws.send_json({"type": "answer", "sdp": pc.localDescription.sdp})
 
             elif typ == "ice":
                 pc = state["peers"][ws]
                 c = msg["candidate"]
-                parts = c["candidate"].split()
-                cand = RTCIceCandidate(
-                    foundation=parts[0].split(":", 1)[1],
-                    component=int(parts[1]),
-                    protocol=parts[2].lower(),
-                    priority=int(parts[3]),
-                    ip=parts[4],
-                    port=int(parts[5]),
-                    type=parts[7],
+                await pc.addIceCandidate(RTCIceCandidate(
+                    foundation=c["candidate"].split()[0].split(":")[1],
+                    component=int(c["candidate"].split()[1]),
+                    protocol=c["candidate"].split()[2],
+                    priority=int(c["candidate"].split()[3]),
+                    ip=c["candidate"].split()[4],
+                    port=int(c["candidate"].split()[5]),
+                    type=c["candidate"].split()[7],
                     sdpMid=c.get("sdpMid"),
                     sdpMLineIndex=c.get("sdpMLineIndex")
-                )
-                try:
-                    await pc.addIceCandidate(cand)
-                except:
-                    pass
+                ))
 
             elif typ == "chat":
                 for peer in state["peers"]:
@@ -171,7 +162,11 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
 
             elif typ == "material_event" and ws in state["admins"]:
                 for peer in state["peers"]:
-                    await peer.send_json({"type": "material_event", "event": msg["event"], "payload": msg.get("payload", {})})
+                    await peer.send_json({
+                        "type": "material_event",
+                        "event": msg["event"],
+                        "payload": msg.get("payload", {})
+                    })
 
     except WebSocketDisconnect:
         pass

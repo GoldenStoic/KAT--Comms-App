@@ -1,8 +1,9 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Voice+Chat Room (Debug Mode)</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Training Room (Debug Mode)</title>
   <style>
     body { font-family: sans-serif; }
     #waiting, #chat, #controls, #material { margin: 1em; }
@@ -17,7 +18,7 @@
   <div id="controls" style="display:none;">
     <button id="admitBtn">(Admin) Admit Selected</button>
     <select id="waitingList"></select>
-    <br/><br/>
+    <br /><br />
     <button id="nextSlide">Next Slide</button>
     <button id="startQuiz">Start Quiz</button>
   </div>
@@ -26,27 +27,24 @@
 
   <div id="chat" style="display:none;">
     <div id="chatLog" style="height:200px; overflow:auto; border:1px solid #ccc;"></div>
-    <input id="msgIn" placeholder="Message…"/><button id="sendBtn">Send</button>
+    <input id="msgIn" placeholder="Message…" />
+    <button id="sendBtn">Send</button>
   </div>
 
   <h2>Connection Stats</h2>
   <div id="stats">No stats yet</div>
 
   <script>
-    const token   = prompt("Enter token (admin or user JWT)"),
-          roomId  = "room123",
-          proto   = location.protocol === "https:" ? "wss" : "ws",
-          ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
+    const token = prompt("Enter token (admin or user JWT)"),
+      roomId = "room123",
+      proto = location.protocol === "https:" ? "wss" : "ws",
+      ws = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    let ICE_SERVERS = [], pc, localStream, hasOffered = false, audioCtx;
+    let ICE_SERVERS = [], pc, localStream, hasOffered = false;
 
-    document.body.addEventListener('click', () => {
-      if (!audioCtx) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-      }
-      if (audioCtx.state === 'suspended') {
-        audioCtx.resume();
-      }
+    document.body.addEventListener("click", () => {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
     });
 
     async function loadIceServers() {
@@ -54,7 +52,7 @@
       ICE_SERVERS = await res.json();
     }
 
-    ws.onopen  = () => console.log("🔗 WebSocket connected");
+    ws.onopen = () => console.log("🔗 WebSocket connected");
     ws.onclose = () => console.log("🔌 WebSocket closed");
 
     ws.onmessage = async ({ data }) => {
@@ -71,13 +69,13 @@
           document.getElementById("controls").style.display = "block";
           const opt = document.createElement("option");
           opt.value = msg.peer_id;
-          opt.text  = `User ${msg.peer_id}`;
+          opt.text = `User ${msg.peer_id}`;
           document.getElementById("waitingList").appendChild(opt);
           break;
 
         case "admitted":
-          document.getElementById("waiting").style.display  = "none";
-          document.getElementById("chat").style.display     = "block";
+          document.getElementById("waiting").style.display = "none";
+          document.getElementById("chat").style.display = "block";
           document.getElementById("controls").style.display =
             (tokenRole() === "admin") ? "block" : "none";
           break;
@@ -92,7 +90,7 @@
           break;
 
         case "answer":
-          await pc.setRemoteDescription({ type:"answer", sdp:msg.sdp });
+          await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
           break;
 
         case "ice":
@@ -140,31 +138,20 @@
         console.log("Connection state:", pc.connectionState);
 
       pc.ontrack = e => {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-  }
-
-  const remoteStream = new MediaStream([e.track]);  // use the track directly
-  const src = audioCtx.createMediaStreamSource(remoteStream);
-  src.connect(audioCtx.destination);
-
-  console.log("🎧 Remote audio connected via AudioContext");
-        console.log("🎧 Remote audio connected via AudioContext");
+        const audio = document.createElement("audio");
+        audio.srcObject = e.streams[0];
+        audio.autoplay = true;
+        audio.controls = true;
+        audio.preload = "none";
+        audio.playbackRate = 1.0;
+        document.body.appendChild(audio);
       };
 
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
       pc.onnegotiationneeded = async () => {
-        await pc.setLocalDescription(await pc.createOffer());
-
-        // Force Opus codec preference if supported
-        const senders = pc.getSenders().filter(s => s.track.kind === "audio");
-        const opus = RTCRtpSender.getCapabilities('audio').codecs.find(c => c.mimeType === 'audio/opus');
-        if (opus && senders.length > 0) {
-          senders[0].setCodecPreferences([opus]);
-          console.log("🎯 Opus codec preference applied");
-        }
-
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
         ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
       };
     }
@@ -176,9 +163,9 @@
         let out = "", now = performance.now().toFixed(0);
         stats.forEach(r => {
           if (r.type === "inbound-rtp" && r.kind === "audio") {
-            const rtt = (r.roundTripTime||r.currentRoundTripTime||0).toFixed(3),
-                  jb  = (r.jitterBufferDelay||0).toFixed(3),
-                  em  = r.jitterBufferEmittedCount||0;
+            const rtt = (r.roundTripTime || r.currentRoundTripTime || 0).toFixed(3),
+              jb = (r.jitterBufferDelay || 0).toFixed(3),
+              em = r.jitterBufferEmittedCount || 0;
             out += `RTT:${rtt}s  jBufDelay:${jb}s  emitCount:${em}\n`;
           }
         });
