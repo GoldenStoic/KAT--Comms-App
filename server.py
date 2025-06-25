@@ -141,7 +141,6 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                         new_lines.append("a=rtpmap:111 opus/48000/2")
                         new_lines.append("a=fmtp:111 minptime=10;useinbandfec=1;stereo=0;maxaveragebitrate=20000")
                 patched_sdp = "\r\n".join(new_lines) + "\r\n"
-                print("📡 Local SDP:\n", pc.localDescription.sdp)
 
 
                 await pc.setLocalDescription(
