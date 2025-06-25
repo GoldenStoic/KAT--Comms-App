@@ -38,12 +38,10 @@
           proto   = location.protocol === "https:" ? "wss" : "ws",
           ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    let ICE_SERVERS = [], pc, localStream, hasOffered = false, audioCtx;
+    let ICE_SERVERS = [], pc, localStream, hasOffered = false;
 
     document.body.addEventListener('click', () => {
-      if (!audioCtx) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-      }
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtx.state === 'suspended') {
         audioCtx.resume();
       }
@@ -140,16 +138,13 @@
         console.log("Connection state:", pc.connectionState);
 
       pc.ontrack = e => {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-  }
+        console.log("📥 Received track:", e.track.kind);
 
-  const remoteStream = new MediaStream([e.track]);  // use the track directly
-  const src = audioCtx.createMediaStreamSource(remoteStream);
-  src.connect(audioCtx.destination);
-
-  console.log("🎧 Remote audio connected via AudioContext");
-        console.log("🎧 Remote audio connected via AudioContext");
+        const audioElem = document.createElement("audio");
+        audioElem.autoplay = true;
+        audioElem.controls = true;
+        audioElem.srcObject = new MediaStream([e.track]);
+        document.body.appendChild(audioElem);
       };
 
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
