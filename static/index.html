@@ -140,12 +140,15 @@
         console.log("Connection state:", pc.connectionState);
 
       pc.ontrack = e => {
-        if (!audioCtx) {
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-        }
-        const remoteStream = e.streams[0];
-        const src = audioCtx.createMediaStreamSource(remoteStream);
-        src.connect(audioCtx.destination);
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  }
+
+  const remoteStream = new MediaStream([e.track]);  // use the track directly
+  const src = audioCtx.createMediaStreamSource(remoteStream);
+  src.connect(audioCtx.destination);
+
+  console.log("🎧 Remote audio connected via AudioContext");
         console.log("🎧 Remote audio connected via AudioContext");
       };
 
