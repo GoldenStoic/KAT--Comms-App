@@ -130,11 +130,11 @@ async def ws_endpoint(ws: WebSocket, room_id: str):
                 new_lines = []
                 for line in lines:
                     new_lines.append(line)
-                    if line.startswith("m=audio"):
-                        new_lines.append("a=sendrecv")
-                        new_lines.append("a=rtpmap:111 opus/48000/2")
-                        new_lines.append("a=fmtp:111 minptime=10;useinbandfec=1;stereo=0;maxaveragebitrate=20000;usedtx=1")
-                        new_lines.append("a=ptime:10")
+                if line.startswith("m=audio"):
+                    new_lines.append("a=sendrecv")
+                    new_lines.append("a=rtpmap:111 opus/48000/2")
+                    new_lines.append("a=fmtp:111 minptime=10;useinbandfec=1;stereo=0;maxplaybackrate=48000;sprop-maxcapturerate=48000;maxaveragebitrate=64000;ptime=20")
+
                 patched_sdp = "\r\n".join(new_lines) + "\r\n"
 
                 await pc.setLocalDescription(RTCSessionDescription(sdp=patched_sdp, type="answer"))

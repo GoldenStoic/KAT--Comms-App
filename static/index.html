@@ -38,10 +38,12 @@
           proto   = location.protocol === "https:" ? "wss" : "ws",
           ws      = new WebSocket(`${proto}://${location.host}/ws/${roomId}?token=${encodeURIComponent(token)}`);
 
-    let ICE_SERVERS = [], pc, localStream, hasOffered = false;
+    let ICE_SERVERS = [], pc, localStream, hasOffered = false, audioCtx;
 
     document.body.addEventListener('click', () => {
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      }
       if (audioCtx.state === 'suspended') {
         audioCtx.resume();
       }
@@ -138,19 +140,31 @@
         console.log("Connection state:", pc.connectionState);
 
       pc.ontrack = e => {
-        console.log("📥 Received track:", e.track.kind);
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  }
 
-        const audioElem = document.createElement("audio");
-        audioElem.autoplay = true;
-        audioElem.controls = true;
-        audioElem.srcObject = new MediaStream([e.track]);
-        document.body.appendChild(audioElem);
+  const remoteStream = new MediaStream([e.track]);  // use the track directly
+  const src = audioCtx.createMediaStreamSource(remoteStream);
+  src.connect(audioCtx.destination);
+
+  console.log("🎧 Remote audio connected via AudioContext");
+        console.log("🎧 Remote audio connected via AudioContext");
       };
 
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
       pc.onnegotiationneeded = async () => {
         await pc.setLocalDescription(await pc.createOffer());
+
+        // Force Opus codec preference if supported
+        const senders = pc.getSenders().filter(s => s.track.kind === "audio");
+        const opus = RTCRtpSender.getCapabilities('audio').codecs.find(c => c.mimeType === 'audio/opus');
+        if (opus && senders.length > 0) {
+          senders[0].setCodecPreferences([opus]);
+          console.log("🎯 Opus codec preference applied");
+        }
+
         ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
       };
     }
